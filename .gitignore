@@ -1,4 +1,38 @@
-.venv/
-.env
+# ---- Python ----
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ---- Virtual env ----
+.venv/
+venv/
+env/
+
+# ---- Env / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Databases (local data, do not commit) ----
+*.db
+*.sqlite
+*.sqlite3
+gymrat_dev.db
+
+# ---- Tooling / editors ----
+.claude/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ---- Test / coverage ----
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
