@@ -6,6 +6,7 @@
 from datetime import datetime, timedelta
 from db.session import SessionLocal
 from db.models import WeightLog, WorkoutLog, InbodyLog, MealLog
+from tools.workout_parser import session_volume
 
 
 def analyze_trend(user_id: str, metric: str = "weight", 
@@ -65,7 +66,7 @@ def _trend_volume(user_id: str, since) -> dict:
         session.close()
 
     # 세션별 총 볼륨 -> 0인 세션은 제외
-    volumes = [v for log in logs if (v := _session_volume(log.parsed)) > 0]
+    volumes = [v for log in logs if (v := session_volume(log.parsed)) > 0]
 
     if len(volumes) < 2:
         return {"direction": "flat", 
@@ -100,15 +101,3 @@ def _trend_inbody(user_id: str, since) -> dict:
 def _trend_meal(user_id: str, since) -> dict:
     # TODO: 식단 로그 빈도/균형 패턴 (질적)
     return {"direction": "flat", "summary": "식단 데이터 분석 (TODO)", "flag": None}
-
-def _session_volume(parsed) -> float:
-    """한 세션 parsed에서 Σ(weight×sets×reps). None 항목은 skip."""
-    if not parsed:
-        return 0.0
-    total = 0.0
-    for item in parsed:
-        w, s, r = item.get("weight"), item.get("sets"), item.get("reps")
-        if w is None or s is None or r is None:
-            continue            # 맨몸/누락은 볼륨에서 제외
-        total += w * s * r
-    return total
