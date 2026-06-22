@@ -106,7 +106,7 @@ def _parse_workout(raw_text: str) -> tuple[list[dict], list[str]]:
 
 
 def log_meal(user_id: str, photo_analysis: str,
-             meal_time: str | None = None) -> dict:
+            meal_time: str | None = None) -> dict:
     """식단 사진 분석 결과(호스트 LLM 텍스트)를 저장하고 질적 코멘트를 단다.
 
     ⚠️ 가드레일: 정확 칼로리/그램 수치 ❌ → 질적 코칭만.
