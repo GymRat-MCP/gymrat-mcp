@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 구현 분담표 / 플랜 논의
+    url: https://github.com/GymRat-MCP/gymrat-mcp/discussions
+    about: 분담·설계 합의는 Discussions에서 (페르소나 톤, 데이터 계약 등)

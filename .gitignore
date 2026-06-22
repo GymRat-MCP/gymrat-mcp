@@ -36,3 +36,6 @@ gymrat_dev.db
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+
+# ---- se hyeon ----
+.jayden
