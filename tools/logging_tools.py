@@ -2,6 +2,7 @@
 from datetime import date as date_cls, datetime
 from db.session import SessionLocal
 from db.models import WeightLog, InbodyLog, WorkoutLog, MealLog, User
+from tools.workout_parser import parse_workout, normalize_exercise
 
 
 def _today():
@@ -66,15 +67,21 @@ def log_inbody(user_id: str, weight: float | None = None,
 
 
 def log_workout(user_id: str, raw_text: str,
+                exercises: list[dict] | None = None,
                 confirm_with_history: bool = True,
                 date: str | None = None) -> dict:
     """운동 기록을 자연어 한 줄로 받아 파싱·저장한다.
 
     예: "벤치 70 5x5, 인클 60 3x10"
-    실제 파싱은 호스트 LLM이 구조화해 넘겨주는 게 가장 안정적이지만,
-    여기서도 기본 파서를 둔다(TODO). 모호/누락 항목은 needs_confirmation으로.
     """
-    parsed, needs_confirmation = _parse_workout(raw_text)
+    if exercises is not None:
+        parsed = exercises
+        needs_confirmation = []
+    else:
+        parsed, needs_confirmation = parse_workout(raw_text)
+
+    for item in parsed:
+        item["exercise"] = normalize_exercise(item.get("exercise", ""))
 
     # TODO: confirm_with_history=True면 누락 weight를 직전 동일 종목 기록으로 채우기
     #       (analyze 모듈/직전 WorkoutLog 조회)
@@ -94,15 +101,6 @@ def log_workout(user_id: str, raw_text: str,
     finally:
         session.close()
 
-
-def _parse_workout(raw_text: str) -> tuple[list[dict], list[str]]:
-    """아주 단순한 기본 파서 (TODO: 정교화 또는 호스트 LLM 위임).
-
-    반환: (parsed[], needs_confirmation[])
-    parsed item: {exercise, weight, sets, reps}
-    """
-    # TODO: "벤치 70 5x5" 형태 정규식/토큰 파싱 구현
-    return [], []
 
 
 def log_meal(user_id: str, photo_analysis: str,
