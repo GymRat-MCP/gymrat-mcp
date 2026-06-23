@@ -45,10 +45,17 @@ def log_inbody(user_id: str, weight: float = None, skeletal_muscle: float = None
 
 
 @mcp.tool()
-def log_workout(user_id: str, raw_text: str, confirm_with_history: bool = True,
+def log_workout(user_id: str, raw_text: str, 
+                exercises: list[dict] = None,
+                confirm_with_history: bool = True,
                 date: str = None) -> dict:
-    """운동 기록을 자연어 한 줄로 받아 파싱·저장한다. 예: '벤치 70 5x5'."""
-    return logging_tools.log_workout(user_id, raw_text, confirm_with_history, date)
+    """운동 기록을 저장한다.
+    raw_text: 사용자가 말한 원문 그대로.
+    exercises: 원문을 파싱한 구조화 배열. 각 항목은
+    {exercise: str, weight: float|null, sets: int|null, reps: int|null}.
+    맨몸운동은 weight=null. 반드시 exercise/weight/sets/reps 키로 분해해 넘겨라.
+    """
+    return logging_tools.log_workout(user_id, raw_text, exercises, confirm_with_history, date)
 
 
 @mcp.tool()
