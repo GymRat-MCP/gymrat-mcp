@@ -45,17 +45,19 @@ def log_inbody(user_id: str, weight: float = None, skeletal_muscle: float = None
 
 
 @mcp.tool()
-def log_workout(user_id: str, raw_text: str, 
+def log_workout(user_id: str, raw_text: str,
                 exercises: list[dict] = None,
-                confirm_with_history: bool = True,
-                date: str = None) -> dict:
+                date: str = None,
+                confirm_with_history: bool = True) -> dict:
     """운동 기록을 저장한다.
     raw_text: 사용자가 말한 원문 그대로.
     exercises: 원문을 파싱한 구조화 배열. 각 항목은
     {exercise: str, weight: float|null, sets: int|null, reps: int|null}.
     맨몸운동은 weight=null. 반드시 exercise/weight/sets/reps 키로 분해해 넘겨라.
+    confirm_with_history=True(기본)면 weight 누락 시 이전 기록에서 자동으로 채운다.
     """
-    return logging_tools.log_workout(user_id, raw_text, exercises, confirm_with_history, date)
+    return logging_tools.log_workout(
+        user_id, raw_text, exercises, date, confirm_with_history)
 
 
 @mcp.tool()
