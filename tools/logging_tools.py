@@ -18,6 +18,65 @@ def _parse_date(s: str | None):
         return _today()
 
 
+def _fmt_delta(value: float | None, unit: str) -> str | None:
+    if value is None:
+        return None
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.1f}{unit}"
+
+
+def _inbody_note(previous: InbodyLog | None, current: InbodyLog) -> str:
+    if previous is None:
+        return "첫 인바디 기록이에요. 앞으로 변화 추적의 기준점으로 삼을게요."
+
+    parts = []
+    if current.weight is not None and previous.weight is not None:
+        parts.append(f"체중 {_fmt_delta(current.weight - previous.weight, 'kg')}")
+    if current.skeletal_muscle is not None and previous.skeletal_muscle is not None:
+        parts.append(f"골격근량 {_fmt_delta(current.skeletal_muscle - previous.skeletal_muscle, 'kg')}")
+    if current.body_fat_pct is not None and previous.body_fat_pct is not None:
+        parts.append(f"체지방률 {_fmt_delta(current.body_fat_pct - previous.body_fat_pct, '%p')}")
+
+    if not parts:
+        return "인바디 기록 완료. 비교 가능한 이전 수치가 더 쌓이면 변화도 같이 볼게요."
+
+    return "직전 인바디 대비 " + ", ".join(parts) + " 변화가 있어요."
+
+
+def _meal_quality_note(photo_analysis: str) -> str:
+    text = (photo_analysis or "").lower()
+    protein_words = ["단백질", "닭", "계란", "달걀", "고기", "소고기", "돼지", "생선",
+                     "연어", "참치", "두부", "콩", "그릭요거트", "요거트", "쉐이크"]
+    veggie_words = ["채소", "야채", "샐러드", "나물", "브로콜리", "양배추", "상추",
+                    "오이", "토마토", "김치", "버섯"]
+    carb_words = ["밥", "현미", "쌀", "고구마", "감자", "빵", "면", "파스타",
+                  "오트", "시리얼", "떡"]
+
+    has_protein = any(word in text for word in protein_words)
+    has_veggie = any(word in text for word in veggie_words)
+    has_carb = any(word in text for word in carb_words)
+
+    missing = []
+    if not has_protein:
+        missing.append("단백질")
+    if not has_veggie:
+        missing.append("채소")
+    if not has_carb:
+        missing.append("탄수화물")
+
+    if not missing:
+        return "단백질, 채소, 탄수화물 구성이 꽤 균형 있어 보여요. 이 흐름 유지해봐요."
+    if len(missing) == 3:
+        return "사진 설명만으로는 구성이 선명하지 않아요. 다음 기록엔 주된 단백질, 채소, 탄수화물을 같이 알려주세요."
+    if missing == ["탄수화물"]:
+        return "단백질과 채소는 괜찮아 보여요. 운동 전후라면 탄수화물도 적당히 챙기면 좋아요."
+    if missing == ["채소"]:
+        return "주요 에너지원은 있어 보여요. 다음 끼니엔 채소를 더해 포만감과 균형을 챙겨봐요."
+    if missing == ["단백질"]:
+        return "탄수화물과 곁들임은 보여요. 근육 회복을 위해 다음 끼니엔 단백질을 보강해봐요."
+    return f"{'·'.join(missing)} 쪽이 조금 비어 보여요. 다음 끼니에서 부족한 축만 보완하면 됩니다."
+
+
 def log_weight(user_id: str, weight: float, body_fat: float | None = None,
                date: str | None = None) -> dict:
     """체중(kg)과 선택적 체지방률(%)을 기록한다."""
@@ -48,16 +107,36 @@ def log_inbody(user_id: str, weight: float | None = None,
     """
     session = SessionLocal()
     try:
-        session.add(InbodyLog(
-            user_id=user_id, measured_date=_parse_date(measured_date),
+        parsed_date = _parse_date(measured_date)
+        previous = (
+            session.query(InbodyLog)
+            .filter(InbodyLog.user_id == user_id)
+            .order_by(InbodyLog.measured_date.desc(), InbodyLog.id.desc())
+            .first()
+        )
+        current = InbodyLog(
+            user_id=user_id, measured_date=parsed_date,
             weight=weight, skeletal_muscle=skeletal_muscle,
             body_fat_pct=body_fat_pct, raw_note=raw_note,
-        ))
-        # 최신 인바디 체중을 프로필 컨텍스트에도 살짝 반영(선택)
-        session.commit()
+        )
+        session.add(current)
 
-        # TODO: 직전 인바디와 비교해 골격근량/체지방 증감 note 생성
-        note = "인바디 기록 완료."
+        user = session.get(User, user_id)
+        if not user:
+            user = User(id=user_id)
+            session.add(user)
+
+        summary_parts = [f"최근 인바디 {parsed_date.isoformat()}"]
+        if weight is not None:
+            summary_parts.append(f"체중 {weight:.1f}kg")
+        if skeletal_muscle is not None:
+            summary_parts.append(f"골격근량 {skeletal_muscle:.1f}kg")
+        if body_fat_pct is not None:
+            summary_parts.append(f"체지방률 {body_fat_pct:.1f}%")
+        user.summary_context = " / ".join(summary_parts)
+
+        note = _inbody_note(previous, current)
+        session.commit()
         return {"saved": True, "profile_updated": True, "note": note}
     except Exception as e:
         session.rollback()
@@ -109,8 +188,7 @@ def log_meal(user_id: str, photo_analysis: str,
 
     ⚠️ 가드레일: 정확 칼로리/그램 수치 ❌ → 질적 코칭만.
     """
-    # TODO: photo_analysis 기반 질적 note 생성 (룰 기반: 단백질/채소/탄수 균형 체크)
-    qualitative_note = "기록 완료. 다음 끼니 균형 참고할게요."
+    qualitative_note = _meal_quality_note(photo_analysis)
 
     session = SessionLocal()
     try:

@@ -30,6 +30,9 @@ gymrat_dev.db
 *.swp
 .DS_Store
 
+# ---- Local agent planning ----
+tasks/
+
 # ---- Test / coverage ----
 .pytest_cache/
 .coverage

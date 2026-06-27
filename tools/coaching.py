@@ -7,6 +7,7 @@
 """
 from db.session import SessionLocal
 from db.models import User
+from tools.analysis import analyze_trend
 
 
 def generate_meal_plan(user_id: str, goal_override: str | None = None,
@@ -20,14 +21,24 @@ def generate_meal_plan(user_id: str, goal_override: str | None = None,
     """
     schedule = schedule or ["08:00", "12:30", "19:00"]
     goal = goal_override or _goal(user_id)
+    goal_label = goal or "유지"
+    pref_text = f" 선호: {preferences}." if preferences else ""
 
-    # TODO: goal + preferences 기반 끼니별 질적 가이드 생성 (수치 X)
-    meals = [{"time": t, "guide": "TODO: 질적 가이드"} for t in schedule]
+    guides = _meal_guides(goal_label)
+    meals = [
+        {
+            "time": time,
+            "guide": f"{_meal_name(index)}: {guides[index % len(guides)]}{pref_text}",
+        }
+        for index, time in enumerate(schedule)
+    ]
 
-    # TODO: 캘린더 등록 문자열 생성 (native 연동 측에서 사용)
-    calendar_events = []
+    calendar_events = [
+        f"{time} 식사 리마인드: {_meal_name(index)} 균형 챙기기"
+        for index, time in enumerate(schedule)
+    ]
 
-    note = "TODO: 페르소나 톤 반영한 한 줄 코멘트"
+    note = f"{goal_label} 목표에 맞춰 정밀 수치보다 끼니별 균형을 우선으로 잡았어요."
     return {"meals": meals, "calendar_events": calendar_events, "note": note}
 
 
@@ -36,8 +47,33 @@ def get_recommendation(user_id: str) -> dict:
 
     analyze_trend 결과 + 최근 로그를 묶어 '다음에 뭘 하면 좋은지' 제안.
     """
-    # TODO: analyze_trend 호출 결과 종합 → 페르소나 톤으로 방향 제안
-    return {"recommendation": "TODO: 종합 코칭", "based_on": []}
+    goal = _goal(user_id) or "유지"
+    trends = {
+        "weight": analyze_trend(user_id, "weight", 30),
+        "inbody": analyze_trend(user_id, "inbody", 60),
+        "meal": analyze_trend(user_id, "meal", 14),
+    }
+
+    if trends["meal"]["flag"] in {"insufficient_data", "low_meal_logging"}:
+        recommendation = "먼저 식단 사진 기록을 조금 더 쌓아봐요. 기록이 생기면 몸 변화와 같이 묶어서 조정할 수 있어요."
+    elif goal == "증량" and trends["weight"]["direction"] == "down":
+        recommendation = "증량 목표인데 체중이 내려가는 흐름이에요. 다음 며칠은 끼니를 거르지 말고 단백질과 탄수화물 구성을 안정적으로 가져가봐요."
+    elif goal == "감량" and trends["weight"]["direction"] == "up":
+        recommendation = "감량 목표 대비 체중이 오르는 흐름이에요. 제한을 세게 걸기보다 간식과 야식 빈도부터 점검해봐요."
+    elif trends["inbody"]["direction"] == "down":
+        recommendation = "몸 데이터 흐름이 살짝 아쉬워요. 회복, 단백질, 수면을 먼저 챙기고 식사는 너무 빡빡하게 줄이지 않는 쪽이 좋아요."
+    elif trends["meal"]["direction"] == "up":
+        recommendation = "식단 균형이 좋아지는 흐름이에요. 지금처럼 단백질, 채소, 탄수화물 축을 유지하면서 운동 기록과 같이 보겠습니다."
+    else:
+        recommendation = "큰 방향은 안정적이에요. 다음 기록에서는 부족한 식사 축 하나만 보완해서 몸 변화와 같이 확인해봐요."
+
+    return {
+        "recommendation": recommendation,
+        "based_on": [
+            {"metric": metric, **result}
+            for metric, result in trends.items()
+        ],
+    }
 
 
 def _goal(user_id: str) -> str | None:
@@ -47,3 +83,28 @@ def _goal(user_id: str) -> str | None:
         return u.goal if u else None
     finally:
         session.close()
+
+
+def _meal_name(index: int) -> str:
+    names = ["아침", "점심", "저녁", "간식"]
+    return names[index] if index < len(names) else f"식사 {index + 1}"
+
+
+def _meal_guides(goal: str) -> list[str]:
+    if goal == "증량":
+        return [
+            "단백질을 먼저 깔고, 운동 에너지용 탄수화물을 함께 챙겨요.",
+            "밥이나 면 같은 주 에너지원을 빼지 말고, 고기·생선·두부류를 곁들여요.",
+            "하루 마무리는 과식보다 회복에 초점을 두고 단백질과 소화 편한 탄수화물을 챙겨요.",
+        ]
+    if goal == "감량":
+        return [
+            "단백질과 채소를 먼저 채우고, 탄수화물은 활동량에 맞춰 적당히 둬요.",
+            "포만감 있는 구성을 우선하고, 소스·튀김·달달한 음료 빈도를 줄여봐요.",
+            "늦은 시간엔 과한 제한보다 가벼운 단백질과 채소 중심으로 정리해요.",
+        ]
+    return [
+        "단백질, 채소, 탄수화물이 한 끼 안에 모두 보이게 구성해요.",
+        "운동 전후라면 탄수화물을 너무 빼지 말고 회복용 단백질을 같이 챙겨요.",
+        "하루 전체 균형을 보고 부족했던 축을 저녁에 보완해요.",
+    ]

@@ -3,7 +3,7 @@
 이 시계열 누적·분석이 MCP의 차별점(일반 챗봇은 못 함).
 ⚠️ 가드레일: 정확 수치 단정 ❌ → 방향성·질적 summary 중심.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from db.session import SessionLocal
 from db.models import WeightLog, WorkoutLog, InbodyLog, MealLog
 from tools.workout_parser import session_volume
@@ -37,9 +37,47 @@ def _direction(first: float, last: float, eps: float = 0.0) -> str:
     return "flat"
 
 
+def _start_of_day(day) -> datetime:
+    return datetime.combine(day, time.min)
+
+
+def _avg(values: list[float]) -> float:
+    return sum(values) / len(values)
+
+
+def _has_any(text: str, words: list[str]) -> bool:
+    lowered = (text or "").lower()
+    return any(word in lowered for word in words)
+
+
 def _trend_weight(user_id: str, since) -> dict:
-    # TODO: WeightLog 조회 → 첫/마지막 비교 → 선형 추세 + 질적 summary
-    return {"direction": "flat", "summary": "체중 데이터 분석 (TODO)", "flag": None}
+    session = SessionLocal()
+    try:
+        logs = (
+            session.query(WeightLog)
+            .filter(WeightLog.user_id == user_id, WeightLog.date >= since)
+            .order_by(WeightLog.date.asc(), WeightLog.id.asc())
+            .all()
+        )
+    finally:
+        session.close()
+
+    if len(logs) < 2:
+        return {
+            "direction": "flat",
+            "summary": "체중 추세를 보려면 기록이 조금 더 필요해요.",
+            "flag": "insufficient_data",
+        }
+
+    first = logs[0].weight
+    last = logs[-1].weight
+    direction = _direction(first, last, eps=0.3)
+    summary = {
+        "up": "최근 체중은 완만히 오르는 흐름이에요. 증량 중이라면 좋은 신호예요.",
+        "down": "최근 체중은 내려가는 흐름이에요. 감량 중이라면 방향은 잘 잡혀 있어요.",
+        "flat": "체중은 큰 변화 없이 유지 중이에요. 목표에 따라 식사량이나 활동량을 조금 조정해봐요.",
+    }[direction]
+    return {"direction": direction, "summary": summary, "flag": None}
 
 
 def _trend_volume(user_id: str, since) -> dict:
@@ -94,10 +132,109 @@ def _trend_volume(user_id: str, since) -> dict:
 
 
 def _trend_inbody(user_id: str, since) -> dict:
-    # TODO: 골격근량 / 체지방률 증감
-    return {"direction": "flat", "summary": "인바디 데이터 분석 (TODO)", "flag": None}
+    session = SessionLocal()
+    try:
+        logs = (
+            session.query(InbodyLog)
+            .filter(InbodyLog.user_id == user_id, InbodyLog.measured_date >= since)
+            .order_by(InbodyLog.measured_date.asc(), InbodyLog.id.asc())
+            .all()
+        )
+    finally:
+        session.close()
+
+    comparable = [
+        log for log in logs
+        if log.skeletal_muscle is not None or log.body_fat_pct is not None
+    ]
+    if len(comparable) < 2:
+        return {
+            "direction": "flat",
+            "summary": "인바디 추세를 보려면 비교할 기록이 더 필요해요.",
+            "flag": "insufficient_data",
+        }
+
+    first = comparable[0]
+    last = comparable[-1]
+    muscle_delta = (
+        last.skeletal_muscle - first.skeletal_muscle
+        if last.skeletal_muscle is not None and first.skeletal_muscle is not None
+        else None
+    )
+    fat_delta = (
+        last.body_fat_pct - first.body_fat_pct
+        if last.body_fat_pct is not None and first.body_fat_pct is not None
+        else None
+    )
+
+    positive = (
+        (muscle_delta is not None and muscle_delta > 0.2)
+        or (fat_delta is not None and fat_delta < -0.5)
+    )
+    negative = (
+        (muscle_delta is not None and muscle_delta < -0.2)
+        or (fat_delta is not None and fat_delta > 0.5)
+    )
+    direction = "up" if positive and not negative else "down" if negative and not positive else "flat"
+
+    parts = []
+    if muscle_delta is not None:
+        parts.append(f"골격근량 {muscle_delta:+.1f}kg")
+    if fat_delta is not None:
+        parts.append(f"체지방률 {fat_delta:+.1f}%p")
+    change_text = ", ".join(parts) if parts else "비교 가능한 주요 수치 변화가 제한적"
+
+    summary = {
+        "up": f"인바디 흐름은 좋아요. {change_text} 변화가 보여요.",
+        "down": f"인바디 흐름은 점검이 필요해요. {change_text} 변화가 있어요.",
+        "flat": f"인바디는 대체로 유지 중이에요. {change_text} 수준입니다.",
+    }[direction]
+    return {"direction": direction, "summary": summary, "flag": "check_recovery" if direction == "down" else None}
 
 
 def _trend_meal(user_id: str, since) -> dict:
-    # TODO: 식단 로그 빈도/균형 패턴 (질적)
-    return {"direction": "flat", "summary": "식단 데이터 분석 (TODO)", "flag": None}
+    protein_words = ["단백질", "닭", "계란", "달걀", "고기", "생선", "두부", "콩", "요거트"]
+    veggie_words = ["채소", "야채", "샐러드", "나물", "브로콜리", "양배추", "상추", "김치"]
+    carb_words = ["밥", "현미", "고구마", "감자", "빵", "면", "파스타", "오트", "떡"]
+
+    session = SessionLocal()
+    try:
+        logs = (
+            session.query(MealLog)
+            .filter(MealLog.user_id == user_id, MealLog.logged_at >= _start_of_day(since))
+            .order_by(MealLog.logged_at.asc(), MealLog.id.asc())
+            .all()
+        )
+    finally:
+        session.close()
+
+    if not logs:
+        return {
+            "direction": "flat",
+            "summary": "최근 식단 기록이 없어요. 사진 한 장부터 남기면 패턴을 잡아볼게요.",
+            "flag": "insufficient_data",
+        }
+
+    scores = []
+    for log in logs:
+        text = f"{log.photo_analysis or ''} {log.qualitative_note or ''}"
+        score = 0
+        score += 1 if _has_any(text, protein_words) else 0
+        score += 1 if _has_any(text, veggie_words) else 0
+        score += 1 if _has_any(text, carb_words) else 0
+        scores.append(score)
+
+    avg_score = _avg(scores)
+    if len(scores) >= 4:
+        mid = len(scores) // 2
+        direction = _direction(_avg(scores[:mid]), _avg(scores[mid:]), eps=0.25)
+    else:
+        direction = "up" if avg_score >= 2.3 else "flat" if avg_score >= 1.5 else "down"
+
+    summary = {
+        "up": "최근 식단 기록은 균형이 좋아지는 흐름이에요. 단백질·채소·탄수 축을 계속 챙겨봐요.",
+        "down": "최근 식단은 균형 축이 자주 비어요. 다음 끼니에서 단백질이나 채소를 먼저 보완해봐요.",
+        "flat": "식단은 대체로 비슷한 패턴이에요. 부족한 축 하나만 정해서 보완하면 좋아요.",
+    }[direction]
+    flag = "low_meal_logging" if len(logs) < 3 else "needs_balance" if direction == "down" else None
+    return {"direction": direction, "summary": summary, "flag": flag}
