@@ -3,9 +3,13 @@
 server.py는 얇게 유지한다: 툴 등록만. 로직은 tools/ 안에.
 전송: Streamable HTTP (원격 Endpoint 등록용).
 """
+import os
+
 from fastmcp import FastMCP
 
-from db.session import init_db
+from db.session import init_db, SessionLocal
+from db.models import ExerciseLibrary
+from db.seed_exercises import seed
 from tools import profile, logging_tools, analysis, routine, coaching
 
 mcp = FastMCP("gymrat-mcp")
@@ -104,5 +108,13 @@ def get_recommendation(user_id: str) -> dict:
 
 if __name__ == "__main__":
     init_db()
+    # 운동 라이브러리가 비어있으면(새 DB) 1회 적재
+    _s = SessionLocal()
+    try:
+        if _s.query(ExerciseLibrary).count() == 0:
+            seed()
+    finally:
+        _s.close()
     # Streamable HTTP 전송으로 기동 (원격 Endpoint)
-    mcp.run(transport="http", host="0.0.0.0", port=8000)
+    # PORT는 호스팅 환경(Lightsail/PaaS)이 주입할 수 있으므로 env 우선
+    mcp.run(transport="http", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

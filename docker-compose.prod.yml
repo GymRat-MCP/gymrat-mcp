@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: gymrat
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  server:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://user:${POSTGRES_PASSWORD:-password}@db:5432/gymrat
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  # Caddy: HTTPS 종단 + 인증서 자동 발급(Let's Encrypt). 외부엔 443만 노출.
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
