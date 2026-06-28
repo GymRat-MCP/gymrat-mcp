@@ -34,17 +34,40 @@ def session_volume(parsed) -> float:
 _CANON = {
     # key: 저장할 표준 운동명
     # value: 사용자가 입력할 수 있는 별칭들
+    # ── 가슴 ──
     "벤치프레스": ["벤치", "벤치프레스", "바벨벤치", "bench"],
-    "인클라인벤치프레스": ["인클", "인클벤치", "인클라인"],
-    "스쿼트": ["스쿼트", "스콰트", "백스쿼트", "squat"],
+    "인클라인벤치프레스": ["인클", "인클벤치", "인클라인", "인클라인벤치프레스"],
+    "덤벨벤치프레스": ["덤벨벤치", "덤벨벤치프레스", "dbbench"],
+    "딥스": ["딥스", "딥", "dips", "dip"],
+    "체스트프레스": ["체스트프레스", "체스트", "머신벤치", "chestpress"],
+    "케이블플라이": ["케이블플라이", "플라이", "펙덱", "fly"],
+    # ── 등 ──
     "데드리프트": ["데드", "데드리프트", "deadlift"],
-    "오버헤드프레스": ["오버헤드프레스", "ohp", "숄더프레스"],
-    "바벨로우": ["바벨로우", "벤트오버로우", "로우"],
-    "풀업": ["풀업", "턱걸이", "pullup"],
-    "랫풀다운": ["랫풀", "랫풀다운"],
+    "바벨로우": ["바벨로우", "벤트오버로우", "로우", "row"],
+    "풀업": ["풀업", "턱걸이", "pullup", "친업", "chinup"],
+    "랫풀다운": ["랫풀", "랫풀다운", "latpulldown"],
+    "시티드로우": ["시티드로우", "케이블로우", "seatedrow"],
+    # ── 어깨 ──
+    "오버헤드프레스": ["오버헤드프레스", "ohp", "숄더프레스", "밀리터리프레스", "shoulderpress"],
+    "사이드레터럴레이즈": ["사레레", "레터럴레이즈", "사이드레터럴레이즈", "사이드레이즈", "lateralraise"],
+    "페이스풀": ["페이스풀", "facepull"],
+    # ── 하체 ──
+    "스쿼트": ["스쿼트", "스콰트", "백스쿼트", "squat"],
     "레그프레스": ["레그프레스", "legpress"],
-    "레그컬": ["레그컬", "라잉레그컬"],
-    "덤벨컬": ["덤벨컬", "이두컬", "바이셉컬"],
+    "레그컬": ["레그컬", "라잉레그컬", "legcurl"],
+    "레그익스텐션": ["레그익스텐션", "레그익텐", "legextension"],
+    "런지": ["런지", "lunge"],
+    "힙쓰러스트": ["힙쓰러스트", "힙스러스트", "hipthrust"],
+    "카프레이즈": ["카프레이즈", "카프", "calfraise"],
+    # ── 팔 ──
+    "덤벨컬": ["덤벨컬", "이두컬", "바이셉컬", "dumbbellcurl"],
+    "바벨컬": ["바벨컬", "바벨이두컬", "barbellcurl"],
+    "해머컬": ["해머컬", "hammercurl"],
+    "트라이셉스익스텐션": ["트라이셉스익스텐션", "삼두익스텐션", "라잉익스텐션", "tricepsextension"],
+    "케이블푸시다운": ["케이블푸시다운", "푸시다운", "프레스다운", "pushdown"],
+    # ── 코어 ──
+    "플랭크": ["플랭크", "plank"],
+    "크런치": ["크런치", "윗몸일으키기", "crunch", "situp"],
 }
 
 
@@ -86,6 +109,26 @@ def normalize_exercise(name: str) -> str:
     return _ALIAS_TO_CANON.get(_key(name), name.strip())
 
 
+# ── 누락 정보 확인 메시지 ──────────────────────────────────
+_FIELD_KO = {"weight": "무게", "sets": "세트", "reps": "반복"}
+
+
+def needs_confirmation(parsed: list[dict]) -> list[str]:
+    """parsed 항목 중 무게/세트/반복이 빠진 것을 한글 메시지로 만든다.
+
+    자동 채움(_fill_from_history) 후 재계산에도 재사용 → 채워진 항목은
+    자연히 목록에서 빠진다.
+    예: [{"exercise":"풀업","weight":None,...}] → ["풀업: 무게 누락"]
+    """
+    msgs = []
+    for item in parsed:
+        miss = [k for k in ("weight", "sets", "reps") if item.get(k) is None]
+        if miss:
+            ex = item.get("exercise", "")
+            msgs.append(f"{ex}: {'·'.join(_FIELD_KO[k] for k in miss)} 누락")
+    return msgs
+
+
 # ── 운동 기록 파싱 ─────────────────────────────────────────
 def parse_workout(raw_text: str) -> tuple[list[dict], list[str]]:
     """
@@ -105,7 +148,6 @@ def parse_workout(raw_text: str) -> tuple[list[dict], list[str]]:
     ]
     """
     parsed = []
-    needs = []
 
     # 콤마 또는 줄바꿈 기준으로 운동 종목을 나눔
     # 예: "벤치 70 5x5, 인클 60 3x10"
@@ -127,27 +169,41 @@ def parse_workout(raw_text: str) -> tuple[list[dict], list[str]]:
         name = normalize_exercise(nm.group(1)) if nm else seg
 
         # ── 2. 세트 수와 반복 수 추출 ──────────────────────
-        # 지원 형식:
-        # 5x5, 3X10, 4×8, 3*12
+        # 매칭된 토큰은 rest에서 지워 무게 추출과 섞이지 않게 한다.
         sets = None
         reps = None
+        rest = seg
 
-        sr = re.search(r"(\d+)\s*[xX×*]\s*(\d+)", seg)
+        def _cut(text, match):
+            # 매칭 구간을 공백으로 치환해 남은 문자열에서 제거
+            return text[:match.start()] + " " + text[match.end():]
 
+        # 2-1. 세트x반복 묶음 형식: 5x5, 3X10, 4×8, 3*12
+        sr = re.search(r"(\d+)\s*[xX×*]\s*(\d+)", rest)
         if sr:
             sets = int(sr.group(1))
             reps = int(sr.group(2))
+            rest = _cut(rest, sr)
+        else:
+            # 2-2. 한글/단위 토큰: "3세트", "10회", "12렙"
+            sm = re.search(r"(\d+)\s*세트", rest)
+            if sm:
+                sets = int(sm.group(1))
+                rest = _cut(rest, sm)
+            rm = re.search(r"(\d+)\s*(?:회|렙|reps?)", rest)
+            if rm:
+                reps = int(rm.group(1))
+                rest = _cut(rest, rm)
 
         # ── 3. 무게 추출 ───────────────────────────────────
-        # 세트x반복 부분을 먼저 제거
-        # 예: "벤치 70 5x5" → "벤치 70 "
-        rest = re.sub(r"\d+\s*[xX×*]\s*\d+", "", seg)
-
-        # 남은 문자열에서 첫 번째 숫자를 무게로 판단
-        # 예: "벤치 70 " → 70
-        wm = re.search(r"(\d+(?:\.\d+)?)", rest)
-
-        weight = float(wm.group(1)) if wm else None
+        # 3-1. 단위 명시("70kg", "70 킬로")를 우선 인식
+        wm = re.search(r"(\d+(?:\.\d+)?)\s*(?:kg|킬로그램|킬로)", rest)
+        if wm:
+            weight = float(wm.group(1))
+        else:
+            # 3-2. 세트/렙 토큰을 제거한 나머지에서 첫 숫자를 무게로
+            wm = re.search(r"(\d+(?:\.\d+)?)", rest)
+            weight = float(wm.group(1)) if wm else None
 
         # ── 4. 파싱 결과 저장 ──────────────────────────────
         item = {
@@ -159,23 +215,8 @@ def parse_workout(raw_text: str) -> tuple[list[dict], list[str]]:
 
         parsed.append(item)
 
-        # ── 5. 누락된 정보 확인 ────────────────────────────
-        # 무게, 세트, 반복 중 빠진 값이 있으면 확인 필요 목록에 추가
-        miss = [
-            key
-            for key in ("weight", "sets", "reps")
-            if item[key] is None
-        ]
-
-        if miss:
-            kor = {
-                "weight": "무게",
-                "sets": "세트",
-                "reps": "반복",
-            }
-
-            needs.append(
-                f"{name}: {'·'.join(kor[key] for key in miss)} 누락"
-            )
+    # ── 5. 누락된 정보 확인 ────────────────────────────────
+    # 무게/세트/반복 중 빠진 값을 한글 메시지로(자동 채움 후 재계산도 이걸 재사용)
+    needs = needs_confirmation(parsed)
 
     return parsed, needs

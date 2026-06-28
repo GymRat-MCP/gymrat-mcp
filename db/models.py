@@ -72,8 +72,11 @@ class ExerciseLibrary(Base):
     """정적 데이터 — seed_exercises.py로 초기 적재, 이후 read-only"""
     __tablename__ = "exercise_library"
 
-    id        = Column(Integer, primary_key=True, autoincrement=True)
-    name      = Column(String, nullable=False, unique=True)   # "벤치프레스"
-    target    = Column(String, nullable=False)                 # "가슴" | "하체" | ...
-    equipment = Column(String, nullable=True)                  # "바벨" | "덤벨" | "맨몸"
-    form_cues = Column(JSON, nullable=True)                    # ["어깨 내리기", "코어 긴장"]
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    name       = Column(String, nullable=False, unique=True)   # 영문 "barbell bench press" (출력 시 호스트 LLM이 한글화)
+    target     = Column(String, nullable=False)                # "가슴" | "하체" | ...
+    equipment  = Column(String, nullable=True)                 # "바벨" | "덤벨" | "맨몸"
+    form_cues  = Column(JSON, nullable=True)                   # 영문 단계 배열(출력 시 호스트 LLM이 한글화)
+    secondary  = Column(JSON, nullable=True)                   # 보조근육(영문) ["forearms", ...]
+    difficulty = Column(String, nullable=True)                 # 휴리스틱 "초보" | "중급"
+    media      = Column(JSON, nullable=True)                   # {"image": "...", "gif": "..."} 경로(v1 미사용)
