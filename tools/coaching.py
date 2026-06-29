@@ -8,6 +8,7 @@
 from db.session import SessionLocal
 from db.models import User
 from tools.analysis import analyze_trend
+from tools.persona import apply_persona
 
 
 def generate_meal_plan(user_id: str, goal_override: str | None = None,
@@ -20,7 +21,9 @@ def generate_meal_plan(user_id: str, goal_override: str | None = None,
     능동 푸시 불가 → calendar_events를 native 톡캘린더에 등록해 알림 우회.
     """
     schedule = schedule or ["08:00", "12:30", "19:00"]
-    goal = goal_override or _goal(user_id)
+    profile = _profile(user_id)
+    goal = goal_override or (profile.get("goal") if profile else None)
+    persona = (profile.get("persona") if profile else None) or "코치"
     goal_label = goal or "유지"
     pref_text = f" 선호: {preferences}." if preferences else ""
 
@@ -28,7 +31,10 @@ def generate_meal_plan(user_id: str, goal_override: str | None = None,
     meals = [
         {
             "time": time,
-            "guide": f"{_meal_name(index)}: {guides[index % len(guides)]}{pref_text}",
+            "guide": apply_persona(
+                f"{_meal_name(index)}: {guides[index % len(guides)]}{pref_text}",
+                persona,
+            ),
         }
         for index, time in enumerate(schedule)
     ]
@@ -38,8 +44,11 @@ def generate_meal_plan(user_id: str, goal_override: str | None = None,
         for index, time in enumerate(schedule)
     ]
 
-    note = f"{goal_label} 목표에 맞춰 정밀 수치보다 끼니별 균형을 우선으로 잡았어요."
-    return {"meals": meals, "calendar_events": calendar_events, "note": note}
+    note = apply_persona(
+        f"{goal_label} 목표에 맞춰 정밀 수치보다 끼니별 균형을 우선으로 잡았어요.",
+        persona,
+    )
+    return {"meals": meals, "calendar_events": calendar_events, "persona": persona, "note": note}
 
 
 def get_recommendation(user_id: str) -> dict:
@@ -47,7 +56,9 @@ def get_recommendation(user_id: str) -> dict:
 
     analyze_trend 결과 + 최근 로그를 묶어 '다음에 뭘 하면 좋은지' 제안.
     """
-    goal = _goal(user_id) or "유지"
+    profile = _profile(user_id)
+    goal = (profile.get("goal") if profile else None) or "유지"
+    persona = (profile.get("persona") if profile else None) or "코치"
     trends = {
         "weight": analyze_trend(user_id, "weight", 30),
         "inbody": analyze_trend(user_id, "inbody", 60),
@@ -68,19 +79,31 @@ def get_recommendation(user_id: str) -> dict:
         recommendation = "큰 방향은 안정적이에요. 다음 기록에서는 부족한 식사 축 하나만 보완해서 몸 변화와 같이 확인해봐요."
 
     return {
-        "recommendation": recommendation,
+        "recommendation": apply_persona(recommendation, persona),
         "based_on": [
             {"metric": metric, **result}
             for metric, result in trends.items()
         ],
+        "persona": persona,
+        "tone_applied": True,
     }
 
 
 def _goal(user_id: str) -> str | None:
+    profile = _profile(user_id)
+    return profile.get("goal") if profile else None
+
+
+def _profile(user_id: str):
     session = SessionLocal()
     try:
         u = session.get(User, user_id)
-        return u.goal if u else None
+        if not u:
+            return None
+        return {
+            "goal": u.goal,
+            "persona": u.persona,
+        }
     finally:
         session.close()
 
