@@ -28,6 +28,7 @@ class PersonaToneTest(unittest.TestCase):
         recommendation = get_recommendation(user_id)
 
         self.assertIn("악마모드", meal["qualitative_note"])
+        self.assertIn("변명은 여기까지", meal["qualitative_note"])
         self.assertIn("악마모드", trend["summary"])
         self.assertIn("악마모드", plan["note"])
         self.assertIn("악마모드", plan["meals"][0]["guide"])
@@ -44,6 +45,16 @@ class PersonaToneTest(unittest.TestCase):
 
         self.assertEqual(trend["direction"], "down")
         self.assertEqual(trend["flag"], "needs_balance")
+
+    def test_default_coach_persona_has_coach_tone(self):
+        user_id = "coach-tone"
+        update_profile(user_id, goal="유지", persona="코치")
+
+        meal = log_meal(user_id, "닭가슴살 밥 샐러드", "점심")
+
+        self.assertIn("코치모드", meal["qualitative_note"])
+        self.assertIn("운동 많이 될 거야", meal["qualitative_note"])
+        self.assertIn("스트레스 조금 받을 거야", meal["qualitative_note"])
 
 
 if __name__ == "__main__":
