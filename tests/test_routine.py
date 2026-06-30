@@ -26,13 +26,13 @@ def test_split_days_clamped():
     assert targets  # 비어있지 않음
 
 def test_split_focus_english_alias():
-    # 🔴 회귀: 호스트 LLM이 "lower body"(영문)로 보내도 한글 하체로 매핑
+    # 회귀: 호스트 LLM이 "lower body"(영문)로 보내도 한글 하체로 매핑
     label, targets = routine._decide_split(3, "lower body", history=[])
     assert label == "하체 집중"
     assert "하체" in targets
 
 def test_split_focus_unknown_falls_back_not_empty():
-    # 🔴 회귀: 미인식 focus는 빈 루틴 대신 일수 분할로 폴백
+    # 회귀: 미인식 focus는 빈 루틴 대신 일수 분할로 폴백
     label, targets = routine._decide_split(3, "asdf", history=[])
     assert targets  # 절대 비어있지 않음
     assert "집중" not in label  # focus 라벨이 아니라 분할 라벨
@@ -105,7 +105,7 @@ def test_build_exercises_structure(monkeypatch):
     assert first["form_cues"] == ["a"]
 
 def test_build_exercises_excludes_injury_movements(monkeypatch):
-    # 🟠 회귀: 어깨 부상 시 오버헤드 프레스/업라이트로우는 제외돼야 함
+    # 회귀: 어깨 부상 시 오버헤드 프레스/업라이트로우는 제외돼야 함
     fake = {
         "어깨": [
             {"name": "barbell seated overhead press", "form_cues": [], "equipment": "바벨", "secondary": []},
@@ -140,7 +140,7 @@ def test_injury_filters_keyword_match():
     assert routine._injury_filters(None) == (set(), [])
 
 def test_build_exercises_normalizes_experience(monkeypatch):
-    # 🟠 회귀: "초보자"로 와도 초보 종목 필터가 먹어야 함
+    # 회귀: "초보자"로 와도 초보 종목 필터가 먹어야 함
     seen = {}
     def fake_query(part, exp):
         seen["exp"] = exp
