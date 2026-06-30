@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from db.session import SessionLocal
 from db.models import ExerciseLibrary, WorkoutLog, User
 from tools.analysis import _trend_volume
+from tools.profile import normalize_goal, normalize_experience
 
 
 # ── 분할(split) 정의 ───────────────────────────────────────
@@ -45,6 +46,56 @@ _FOCUS_TARGETS = {
     "코어": ["코어"],
     "종아리": ["종아리"],
 }
+
+# 호스트 LLM이 focus를 영문·변형으로 보낼 때 한글 정규 부위로 매핑.
+# (DB target과 _FOCUS_TARGETS 키가 전부 한글이라 매핑 없으면 0건 → 빈 루틴)
+_FOCUS_ALIASES = {
+    # 영문
+    "chest": "가슴", "pec": "가슴", "pecs": "가슴",
+    "back": "등", "lat": "등", "lats": "등",
+    "shoulder": "어깨", "shoulders": "어깨", "delt": "어깨",
+    "delts": "어깨", "deltoid": "어깨", "deltoids": "어깨",
+    "leg": "하체", "legs": "하체", "lower body": "하체",
+    "lower-body": "하체", "lowerbody": "하체", "lower": "하체",
+    "quad": "하체", "quads": "하체", "glute": "하체", "glutes": "하체",
+    "hamstring": "하체", "hamstrings": "하체",
+    "bicep": "이두", "biceps": "이두",
+    "tricep": "삼두", "triceps": "삼두",
+    "arm": "팔", "arms": "팔",
+    "core": "코어", "ab": "코어", "abs": "코어", "abdominals": "코어",
+    "calf": "종아리", "calves": "종아리",
+    # 한글 변형
+    "다리": "하체", "허벅지": "하체", "둔근": "하체", "엉덩이": "하체", "둔근/하체": "하체",
+    "복근": "코어", "복부": "코어", "배": "코어",
+    "흉근": "가슴", "광배": "등", "삼각근": "어깨",
+}
+
+# 부상 키워드 → (후순위로 미룰 target 부위, 제외할 영문 종목명 패턴).
+# 다친 부위를 직접·간접 자극하는 위험 동작을 추천에서 빼거나 뒤로 미룬다.
+# 패턴은 영문 종목명(소문자) 부분일치. 회전근개에 오버헤드 프레스를 처방하던 갭을 메움.
+_INJURY_RULES = [
+    (("어깨", "회전근", "로테이터", "shoulder", "rotator"),
+     {"어깨"},
+     ("overhead press", "military press", "push press", "shoulder press",
+      "thruster", "arnold press", "behind neck", "behind head",
+      "behind the neck", "upright row", "snatch", "jerk",
+      "clean and press", "overhead squat")),
+    (("허리", "요추", "디스크", "lower back", "herniated"),
+     set(),  # '등'은 상부등 → 부위 자체는 유지, 척추 부하 큰 동작만 제외
+     ("deadlift", "good morning", "bent over", "bent-over", "barbell row",
+      "t-bar", "power clean", "hang clean", "overhead squat", "back extension")),
+    (("무릎", "슬개", "반월", "knee"),
+     {"하체"},
+     ("squat", "lunge", "leg press", "leg extension", "jump", "pistol",
+      "step-up", "step up", "sissy")),
+    (("팔꿈치", "elbow", "tennis"),
+     set(),
+     ("skullcrusher", "skull crusher", "lying triceps extension",
+      "pushdown", "close-grip", "close grip", "dip")),
+    (("손목", "wrist"),
+     set(),
+     ("front squat", "power clean", "hang clean", "snatch", "wrist")),
+]
 
 # 컴파운드 우선 정렬에 쓰는 장비 우선순위(낮을수록 우선)
 _EQUIP_PRIORITY = {
@@ -90,14 +141,25 @@ def _recent_workouts(user_id: str, limit: int = 20):
         session.close()
 
 
+def _normalize_focus(focus: str | None) -> str | None:
+    """focus를 한글 정규 부위로 매핑. 인식 불가/미지정이면 None."""
+    if not focus:
+        return None
+    raw = focus.strip()
+    if raw in _FOCUS_TARGETS:          # 이미 정규 한글 부위
+        return raw
+    return _FOCUS_ALIASES.get(raw.lower())
+
+
 def _decide_split(available_days: int, focus: str | None,
                   history) -> tuple[str, list[str]]:
     """일수/focus로 오늘 훈련할 (분할 라벨, 타깃 부위 목록)을 정한다."""
-    if focus:
-        targets = _FOCUS_TARGETS.get(focus, [focus])
-        return f"{focus} 집중", targets
+    norm = _normalize_focus(focus)
+    if norm:
+        return f"{norm} 집중", _FOCUS_TARGETS[norm]
 
-    # 1~6일 범위로 클램프 후 계획 선택
+    # focus 미지정이거나 인식 못한 값("lower body" 등) → 일수 기반 분할로 폴백.
+    # ⚠️ 예전엔 미인식 focus를 그대로 target으로 써서 0건→빈 루틴이 나갔음. 절대 금지.
     days = max(1, min(6, available_days))
     plan = _SPLIT_PLANS[days]
     # 누적 기록 수로 순환 → 호출할수록 다음 분할일로 진행(결정론적)
@@ -105,13 +167,37 @@ def _decide_split(available_days: int, focus: str | None,
     return plan[today_idx]
 
 
+def _injury_filters(injuries: str | None) -> tuple[set[str], list[str]]:
+    """부상 텍스트에서 (후순위 부위, 제외할 영문 종목명 패턴)을 추출한다."""
+    if not injuries:
+        return set(), []
+    text = injuries.lower()
+    deprioritize: set[str] = set()
+    blocked: list[str] = []
+    for keywords, parts, name_pats in _INJURY_RULES:
+        if any(k.lower() in text for k in keywords):
+            deprioritize |= parts
+            blocked.extend(name_pats)
+    return deprioritize, blocked
+
+
+def _name_blocked(name: str, patterns: list[str]) -> bool:
+    low = name.lower()
+    return any(p in low for p in patterns)
+
+
 def _build_exercises(targets: list[str], history, profile,
                      session_minutes: int | None) -> list[dict]:
-    """타깃 부위별 종목 선택 + 목표별 sets/reps + 점진적 과부하 target_load."""
-    experience = getattr(profile, "experience", None)
-    goal = getattr(profile, "goal", None)
+    """타깃 부위별 종목 선택 + 목표별 sets/reps + 점진적 과부하 + 부상 회피."""
+    experience = normalize_experience(getattr(profile, "experience", None))
+    goal = normalize_goal(getattr(profile, "goal", None))
     sets, reps = _sets_reps(goal, experience)
     last_idx = _last_weight_index(history)
+    deprioritize, blocked = _injury_filters(getattr(profile, "injuries", None))
+
+    # 다친 부위는 뒤로 미룬다(완전 제외하면 빈 루틴 위험 → 순서만 낮춤)
+    ordered = ([t for t in targets if t not in deprioritize]
+               + [t for t in targets if t in deprioritize])
 
     # 세션 길이 → 총 종목 수(대략 12분/종목), 미지정 시 6종
     if session_minutes:
@@ -121,8 +207,11 @@ def _build_exercises(targets: list[str], history, profile,
     per_target = 2 if len(targets) <= 3 else 1
 
     result: list[dict] = []
-    for part in targets:
-        for ex in _query_exercises(part, experience)[:per_target]:
+    for part in ordered:
+        # 부상 악화 동작(오버헤드 프레스 등)은 종목 후보에서 제외
+        candidates = [ex for ex in _query_exercises(part, experience)
+                      if not _name_blocked(ex["name"], blocked)]
+        for ex in candidates[:per_target]:
             if len(result) >= total_cap:
                 return result
             result.append({
@@ -155,14 +244,27 @@ def _query_exercises(part: str, experience: str | None) -> list[dict]:
     finally:
         session.close()
 
-    # 바벨/덤벨 등 정석 장비 우선 → 같은 장비 안에서 다관절(보조근 많음) 우선
-    # → 'barbell bench press', 'barbell full squat' 같은 컴파운드가 앞으로
+    # 정렬 우선순위:
+    # 1) 비(非)기술 동작 우선 — 올림픽 리프트(클린·스내치·저크)는 기술 난도가 높고
+    #    데이터 태깅도 부정확(예: clean and press가 '하체')해서 일반 루틴 선두로 부적절 → 뒤로
+    # 2) 정석 장비(바벨>덤벨>…) 우선
+    # 3) 같은 조건이면 다관절(보조근 많음) 우선 → 컴파운드가 앞으로
     items.sort(key=lambda it: (
+        _is_technical_lift(it["name"]),
         _EQUIP_PRIORITY.get(it["equipment"], 9),
         -len(it["secondary"]),
         it["name"],
     ))
     return items
+
+
+# 일반 처방에서 선두에 두기엔 기술 난도가 높은 올림픽/파워 리프트 패턴
+_TECHNICAL_LIFTS = ("clean", "snatch", "jerk", "thruster", "muscle-up", "muscle up")
+
+
+def _is_technical_lift(name: str) -> int:
+    low = name.lower()
+    return 1 if any(p in low for p in _TECHNICAL_LIFTS) else 0
 
 
 def _sets_reps(goal: str | None, experience: str | None) -> tuple[int, int]:
@@ -206,7 +308,7 @@ def _progress(exercise_name: str, last_idx: dict[str, float],
 def _rationale(user_id: str, profile, split_label: str,
                exercises: list[dict]) -> str:
     """profile.goal + 볼륨 추세로 처방 근거 한 문장(페르소나 중립)."""
-    goal = getattr(profile, "goal", None)
+    goal = normalize_goal(getattr(profile, "goal", None))
     goal_phrase = {
         "증량": "근비대 중심으로 볼륨을 쌓는",
         "감량": "고반복으로 소모를 높이는",
@@ -227,7 +329,7 @@ def _rationale(user_id: str, profile, split_label: str,
     msg = (f"오늘은 {split_label} — {goal_phrase} 방향으로 "
            f"{len(exercises)}종 구성했어요. {trend_phrase}.")
     if getattr(profile, "injuries", None):
-        msg += " 부상 이력이 있어 무리한 중량은 피하세요."
+        msg += " 부상 이력을 반영해 해당 부위에 무리가 가는 동작은 빼고, 무게는 보수적으로 잡으세요."
     return msg
 
 
