@@ -6,7 +6,10 @@
 from datetime import datetime, time, timedelta
 from db.session import SessionLocal
 from db.models import WeightLog, WorkoutLog, InbodyLog, MealLog
+from tools.persona import apply_persona, get_persona, persona_response_fields
 from tools.workout_parser import session_volume
+
+_session_volume = session_volume
 
 
 def analyze_trend(user_id: str, metric: str = "weight", 
@@ -26,7 +29,28 @@ def analyze_trend(user_id: str, metric: str = "weight",
         return _trend_inbody(user_id, since)
     elif metric == "meal":
         return _trend_meal(user_id, since)
-    return {"direction": "flat", "summary": "지원하지 않는 지표", "flag": None}
+    persona = get_persona(user_id)
+    base_summary = "지원하지 않는 지표"
+    return {
+        "direction": "flat",
+        "summary": apply_persona(base_summary, persona),
+        "base_summary": base_summary,
+        "flag": None,
+        "persona": persona,
+        **persona_response_fields(persona, base_summary),
+    }
+
+
+def _with_persona(user_id: str, result: dict) -> dict:
+    persona = get_persona(user_id)
+    base_summary = result["summary"]
+    return {
+        **result,
+        "summary": apply_persona(base_summary, persona),
+        "base_summary": base_summary,
+        "persona": persona,
+        **persona_response_fields(persona, base_summary),
+    }
 
 
 def _direction(first: float, last: float, eps: float = 0.0) -> str:
@@ -63,11 +87,11 @@ def _trend_weight(user_id: str, since) -> dict:
         session.close()
 
     if len(logs) < 2:
-        return {
+        return _with_persona(user_id, {
             "direction": "flat",
             "summary": "체중 추세를 보려면 기록이 조금 더 필요해요.",
             "flag": "insufficient_data",
-        }
+        })
 
     first = logs[0].weight
     last = logs[-1].weight
@@ -77,7 +101,7 @@ def _trend_weight(user_id: str, since) -> dict:
         "down": "최근 체중은 내려가는 흐름이에요. 감량 중이라면 방향은 잘 잡혀 있어요.",
         "flat": "체중은 큰 변화 없이 유지 중이에요. 목표에 따라 식사량이나 활동량을 조금 조정해봐요.",
     }[direction]
-    return {"direction": direction, "summary": summary, "flag": None}
+    return _with_persona(user_id, {"direction": direction, "summary": summary, "flag": None})
 
 
 def _trend_volume(user_id: str, since) -> dict:
@@ -107,8 +131,8 @@ def _trend_volume(user_id: str, since) -> dict:
     volumes = [v for log in logs if (v := session_volume(log.parsed)) > 0]
 
     if len(volumes) < 2:
-        return {"direction": "flat", 
-                "summary": "볼륨 추세를 보려면 운동 기록이 좀 더 필요해요.", "flag": "insufficient_data"}
+        return _with_persona(user_id, {"direction": "flat",
+                "summary": "볼륨 추세를 보려면 운동 기록이 좀 더 필요해요.", "flag": "insufficient_data"})
     
     # 초반 절반 vs 후반 절반 평균 비교
     mid = len(volumes) // 2
@@ -126,9 +150,9 @@ def _trend_volume(user_id: str, since) -> dict:
     }[direction]
 
 
-    return {"direction": direction,
+    return _with_persona(user_id, {"direction": direction,
             "summary": summary,
-            "flag": "plateau" if direction == "flat" else None}
+            "flag": "plateau" if direction == "flat" else None})
 
 
 def _trend_inbody(user_id: str, since) -> dict:
@@ -148,11 +172,11 @@ def _trend_inbody(user_id: str, since) -> dict:
         if log.skeletal_muscle is not None or log.body_fat_pct is not None
     ]
     if len(comparable) < 2:
-        return {
+        return _with_persona(user_id, {
             "direction": "flat",
             "summary": "인바디 추세를 보려면 비교할 기록이 더 필요해요.",
             "flag": "insufficient_data",
-        }
+        })
 
     first = comparable[0]
     last = comparable[-1]
@@ -189,7 +213,11 @@ def _trend_inbody(user_id: str, since) -> dict:
         "down": f"인바디 흐름은 점검이 필요해요. {change_text} 변화가 있어요.",
         "flat": f"인바디는 대체로 유지 중이에요. {change_text} 수준입니다.",
     }[direction]
-    return {"direction": direction, "summary": summary, "flag": "check_recovery" if direction == "down" else None}
+    return _with_persona(user_id, {
+        "direction": direction,
+        "summary": summary,
+        "flag": "check_recovery" if direction == "down" else None,
+    })
 
 
 def _trend_meal(user_id: str, since) -> dict:
@@ -209,27 +237,37 @@ def _trend_meal(user_id: str, since) -> dict:
         session.close()
 
     if not logs:
-        return {
+        return _with_persona(user_id, {
             "direction": "flat",
             "summary": "최근 식단 기록이 없어요. 사진 한 장부터 남기면 패턴을 잡아볼게요.",
             "flag": "insufficient_data",
-        }
+        })
 
     scores = []
+    category_hits = {"protein": 0, "veggie": 0, "carb": 0}
     for log in logs:
-        text = f"{log.photo_analysis or ''} {log.qualitative_note or ''}"
+        text = log.photo_analysis or ""
+        has_protein = _has_any(text, protein_words)
+        has_veggie = _has_any(text, veggie_words)
+        has_carb = _has_any(text, carb_words)
         score = 0
-        score += 1 if _has_any(text, protein_words) else 0
-        score += 1 if _has_any(text, veggie_words) else 0
-        score += 1 if _has_any(text, carb_words) else 0
+        score += 1 if has_protein else 0
+        score += 1 if has_veggie else 0
+        score += 1 if has_carb else 0
+        category_hits["protein"] += 1 if has_protein else 0
+        category_hits["veggie"] += 1 if has_veggie else 0
+        category_hits["carb"] += 1 if has_carb else 0
         scores.append(score)
 
     avg_score = _avg(scores)
+    missing_majority = min(category_hits.values()) < len(scores) / 2
     if len(scores) >= 4:
         mid = len(scores) // 2
         direction = _direction(_avg(scores[:mid]), _avg(scores[mid:]), eps=0.25)
     else:
         direction = "up" if avg_score >= 2.3 else "flat" if avg_score >= 1.5 else "down"
+    if direction == "flat" and missing_majority:
+        direction = "down"
 
     summary = {
         "up": "최근 식단 기록은 균형이 좋아지는 흐름이에요. 단백질·채소·탄수 축을 계속 챙겨봐요.",
@@ -237,4 +275,4 @@ def _trend_meal(user_id: str, since) -> dict:
         "flat": "식단은 대체로 비슷한 패턴이에요. 부족한 축 하나만 정해서 보완하면 좋아요.",
     }[direction]
     flag = "low_meal_logging" if len(logs) < 3 else "needs_balance" if direction == "down" else None
-    return {"direction": direction, "summary": summary, "flag": flag}
+    return _with_persona(user_id, {"direction": direction, "summary": summary, "flag": flag})
