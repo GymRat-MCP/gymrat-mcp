@@ -29,10 +29,23 @@ class PersonaToneTest(unittest.TestCase):
 
         self.assertIn("악마모드", meal["qualitative_note"])
         self.assertIn("변명은 여기까지", meal["qualitative_note"])
+        self.assertEqual(meal["base_message"], meal["base_qualitative_note"])
+        self.assertEqual(meal["persona_context"]["name"], "악마")
+        self.assertIn("base_message", meal["rewrite_instruction"])
         self.assertIn("악마모드", trend["summary"])
+        self.assertEqual(trend["base_message"], trend["base_summary"])
+        self.assertEqual(trend["persona_context"]["tone"], "짧고 직설적이며 핑계를 줄이는 말투")
         self.assertIn("악마모드", plan["note"])
         self.assertIn("악마모드", plan["meals"][0]["guide"])
+        self.assertIn("base_guide", plan["meals"][0])
+        self.assertEqual(plan["persona_context"]["name"], "악마")
         self.assertIn("악마모드", recommendation["recommendation"])
+        self.assertEqual(recommendation["base_message"], recommendation["base_recommendation"])
+        self.assertEqual(recommendation["persona_context"]["name"], "악마")
+        for basis in recommendation["based_on"]:
+            self.assertNotIn("base_message", basis)
+            self.assertNotIn("persona_context", basis)
+            self.assertNotIn("rewrite_instruction", basis)
         self.assertEqual(recommendation["persona"], "악마")
 
     def test_repeated_missing_protein_flags_needs_balance(self):
@@ -55,6 +68,8 @@ class PersonaToneTest(unittest.TestCase):
         self.assertIn("코치모드", meal["qualitative_note"])
         self.assertIn("운동 많이 될 거야", meal["qualitative_note"])
         self.assertIn("스트레스 조금 받을 거야", meal["qualitative_note"])
+        self.assertEqual(meal["persona_context"]["name"], "코치")
+        self.assertIn("운동 밈 느낌", meal["persona_context"]["tone"])
 
 
 if __name__ == "__main__":

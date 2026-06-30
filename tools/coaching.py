@@ -8,7 +8,7 @@
 from db.session import SessionLocal
 from db.models import User
 from tools.analysis import analyze_trend
-from tools.persona import apply_persona
+from tools.persona import apply_persona, persona_response_fields
 
 
 def generate_meal_plan(user_id: str, goal_override: str | None = None,
@@ -28,27 +28,30 @@ def generate_meal_plan(user_id: str, goal_override: str | None = None,
     pref_text = f" 선호: {preferences}." if preferences else ""
 
     guides = _meal_guides(goal_label)
-    meals = [
-        {
+    meals = []
+    for index, time in enumerate(schedule):
+        base_guide = f"{_meal_name(index)}: {guides[index % len(guides)]}{pref_text}"
+        meals.append({
             "time": time,
-            "guide": apply_persona(
-                f"{_meal_name(index)}: {guides[index % len(guides)]}{pref_text}",
-                persona,
-            ),
-        }
-        for index, time in enumerate(schedule)
-    ]
+            "base_guide": base_guide,
+            "guide": apply_persona(base_guide, persona),
+        })
 
     calendar_events = [
         f"{time} 식사 리마인드: {_meal_name(index)} 균형 챙기기"
         for index, time in enumerate(schedule)
     ]
 
-    note = apply_persona(
-        f"{goal_label} 목표에 맞춰 정밀 수치보다 끼니별 균형을 우선으로 잡았어요.",
-        persona,
-    )
-    return {"meals": meals, "calendar_events": calendar_events, "persona": persona, "note": note}
+    base_note = f"{goal_label} 목표에 맞춰 정밀 수치보다 끼니별 균형을 우선으로 잡았어요."
+    note = apply_persona(base_note, persona)
+    return {
+        "meals": meals,
+        "calendar_events": calendar_events,
+        "persona": persona,
+        "note": note,
+        "base_note": base_note,
+        **persona_response_fields(persona, base_note),
+    }
 
 
 def get_recommendation(user_id: str) -> dict:
@@ -80,11 +83,13 @@ def get_recommendation(user_id: str) -> dict:
 
     return {
         "recommendation": apply_persona(recommendation, persona),
+        "base_recommendation": recommendation,
         "based_on": [
-            {"metric": metric, **result}
+            {"metric": metric, **_compact_trend_result(result)}
             for metric, result in trends.items()
         ],
         "persona": persona,
+        **persona_response_fields(persona, recommendation),
         "tone_applied": True,
     }
 
@@ -92,6 +97,14 @@ def get_recommendation(user_id: str) -> dict:
 def _goal(user_id: str) -> str | None:
     profile = _profile(user_id)
     return profile.get("goal") if profile else None
+
+
+def _compact_trend_result(result: dict) -> dict:
+    return {
+        key: value
+        for key, value in result.items()
+        if key not in {"base_message", "persona_context", "rewrite_instruction"}
+    }
 
 
 def _profile(user_id: str):

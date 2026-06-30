@@ -2,7 +2,7 @@
 from datetime import date as date_cls, datetime
 from db.session import SessionLocal
 from db.models import WeightLog, InbodyLog, WorkoutLog, MealLog, User
-from tools.persona import apply_persona, get_persona
+from tools.persona import apply_persona, get_persona, persona_response_fields
 from tools.workout_parser import (
     parse_workout, normalize_exercise, needs_confirmation,
 )
@@ -139,13 +139,16 @@ def log_inbody(user_id: str, weight: float | None = None,
         user.summary_context = " / ".join(summary_parts)
 
         persona = user.persona or "코치"
-        note = apply_persona(_inbody_note(previous, current), persona)
+        base_note = _inbody_note(previous, current)
+        note = apply_persona(base_note, persona)
         session.commit()
         return {
             "saved": True,
             "profile_updated": True,
             "persona": persona,
             "note": note,
+            "base_note": base_note,
+            **persona_response_fields(persona, base_note),
         }
     except Exception as e:
         session.rollback()
@@ -233,7 +236,8 @@ def log_meal(user_id: str, photo_analysis: str,
     ⚠️ 가드레일: 정확 칼로리/그램 수치 ❌ → 질적 코칭만.
     """
     persona = get_persona(user_id)
-    qualitative_note = apply_persona(_meal_quality_note(photo_analysis), persona)
+    base_note = _meal_quality_note(photo_analysis)
+    qualitative_note = apply_persona(base_note, persona)
 
     session = SessionLocal()
     try:
@@ -246,6 +250,8 @@ def log_meal(user_id: str, photo_analysis: str,
             "saved": True,
             "persona": persona,
             "qualitative_note": qualitative_note,
+            "base_qualitative_note": base_note,
+            **persona_response_fields(persona, base_note),
         }
     except Exception as e:
         session.rollback()

@@ -6,7 +6,7 @@
 from datetime import datetime, time, timedelta
 from db.session import SessionLocal
 from db.models import WeightLog, WorkoutLog, InbodyLog, MealLog
-from tools.persona import apply_persona, get_persona
+from tools.persona import apply_persona, get_persona, persona_response_fields
 from tools.workout_parser import session_volume
 
 _session_volume = session_volume
@@ -30,17 +30,27 @@ def analyze_trend(user_id: str, metric: str = "weight",
     elif metric == "meal":
         return _trend_meal(user_id, since)
     persona = get_persona(user_id)
+    base_summary = "지원하지 않는 지표"
     return {
         "direction": "flat",
-        "summary": apply_persona("지원하지 않는 지표", persona),
+        "summary": apply_persona(base_summary, persona),
+        "base_summary": base_summary,
         "flag": None,
         "persona": persona,
+        **persona_response_fields(persona, base_summary),
     }
 
 
 def _with_persona(user_id: str, result: dict) -> dict:
     persona = get_persona(user_id)
-    return {**result, "summary": apply_persona(result["summary"], persona), "persona": persona}
+    base_summary = result["summary"]
+    return {
+        **result,
+        "summary": apply_persona(base_summary, persona),
+        "base_summary": base_summary,
+        "persona": persona,
+        **persona_response_fields(persona, base_summary),
+    }
 
 
 def _direction(first: float, last: float, eps: float = 0.0) -> str:
