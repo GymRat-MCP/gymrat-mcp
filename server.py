@@ -28,7 +28,10 @@ def update_profile(user_id: str, goal: str | None = None,
                    injuries: str | None = None,
                    persona: str | None = None,
                    summary_context: str | None = None) -> dict:
-    """프로필을 생성/부분 갱신한다. persona: 천사|악마|코치|현실파이터."""
+    """프로필을 생성/부분 갱신한다(전달된 필드만).
+    goal: 증량|감량|유지. experience: 초보|중급|고급. persona: 천사|악마|코치|현실파이터.
+    injuries: 부위를 포함한 자유 텍스트(예: "오른쪽 어깨 회전근개")—루틴에서 자극 동작 회피에 사용.
+    값은 반드시 한글로 보내라(영문/변형도 내부 정규화하지만 한글이 가장 정확)."""
     return profile.update_profile(user_id, goal, experience, injuries,
                                   persona, summary_context)
 
@@ -88,7 +91,11 @@ def analyze_trend(user_id: str, metric: str = "weight",
 def generate_routine(user_id: str, focus: str | None = None,
                      available_days: int = 3,
                      session_minutes: int | None = None) -> dict:
-    """목표·이력 기반 운동 루틴을 처방한다(점진적 과부하 + 자세 큐)."""
+    """목표·이력 기반 운동 루틴을 처방한다(점진적 과부하 + 자세 큐 + 부상 회피).
+    focus(선택): 반드시 한글 부위명 하나로 — 가슴|등|어깨|하체|이두|삼두|팔|코어|종아리.
+    "lower body" 같은 영문/변형은 내부에서 한글로 매핑하며, 미지정·미인식 시
+    available_days(1~6, 범위 밖은 클램프) 기반 분할로 폴백한다(빈 루틴 반환 안 함).
+    session_minutes: 분 단위(종목 수 산정에 사용)."""
     return routine.generate_routine(user_id, focus, available_days, session_minutes)
 
 
