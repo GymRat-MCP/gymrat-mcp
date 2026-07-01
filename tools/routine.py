@@ -8,6 +8,8 @@ from db.session import SessionLocal
 from db.models import ExerciseLibrary, WorkoutLog, User
 from tools.analysis import _trend_volume
 from tools.profile import normalize_goal, normalize_experience
+from tools.workout_parser import normalize_exercise
+from tools.exercise_map import lib_to_ko_canon
 
 
 # ── 분할(split) 정의 ───────────────────────────────────────
@@ -281,13 +283,19 @@ def _sets_reps(goal: str | None, experience: str | None) -> tuple[int, int]:
 
 
 def _last_weight_index(history) -> dict[str, float]:
-    """최근 기록에서 종목별 가장 최근 무게를 모은다(이름 일치 기준)."""
+    """최근 기록에서 종목별 가장 최근 무게를 모은다(정규 한글명 기준).
+
+    로그 종목명은 parse_workout가 이미 정규화하지만, 별칭/영문 원문이 섞여도
+    같은 공간(정규 한글)으로 모으도록 normalize_exercise를 한 번 더 태운다.
+    """
     idx: dict[str, float] = {}
     for log in history:  # history는 date desc → 먼저 본 게 최신
         for entry in (log.parsed or []):
             ex, w = entry.get("exercise"), entry.get("weight")
-            if ex and w is not None and ex not in idx:
-                idx[ex] = w
+            if ex and w is not None:
+                key = normalize_exercise(ex)
+                if key not in idx:
+                    idx[key] = w
     return idx
 
 
@@ -295,10 +303,14 @@ def _progress(exercise_name: str, last_idx: dict[str, float],
               part: str) -> float | None:
     """직전 무게가 있으면 점진적 과부하 제안 중량을 계산한다.
 
-    ⚠️ 라이브러리 종목명은 영문, 사용자 로그는 한글 canonical이라 보통
-    매칭되지 않아 None(첫 처방). 이름이 일치할 때만 +증량 제안.
+    처방 종목은 라이브러리 영문명, 로그(last_idx)는 정규 한글명이라
+    비교 전 영문 → 정규 한글로 변환해 같은 공간에서 매칭한다(끊김 A 제거, 이슈 #13).
+    큐레이션된 28종 대표만 변환되고, 매핑 안 된 종목은 None(회귀 없음).
     """
-    last = last_idx.get(exercise_name)
+    ko = lib_to_ko_canon(exercise_name)
+    last = last_idx.get(ko) if ko is not None else None
+    if last is None:                       # 브리지 미스 시 이름 직접 일치로 폴백
+        last = last_idx.get(exercise_name)
     if last is None:
         return None
     increment = 5.0 if part == "하체" else 2.5
