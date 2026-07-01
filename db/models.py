@@ -68,6 +68,25 @@ class MealLog(Base):
     logged_at        = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class Program(Base):
+    """주기화 프로그램 상태 — 유저당 1개 활성 블록(Phase 3, #15).
+
+    generate_routine이 history 카운트가 아니라 이 프로그램의 '주차'를 읽어
+    진행하고, deload_every 주마다 자동 디로드 주간을 잡는다.
+    week는 started_at 기준으로 파생(호출마다 write 불필요, 결정론적).
+    """
+    __tablename__ = "programs"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    user_id      = Column(String, nullable=False, unique=True)   # 유저당 1개 활성 프로그램
+    split_type   = Column(Integer, nullable=False)               # 주당 훈련일(=available_days)
+    started_at   = Column(Date, nullable=False)                  # 블록 시작일(주차 파생 기준)
+    deload_every = Column(Integer, default=4)                    # N주마다 디로드 주간
+    week_index   = Column(Integer, default=0)                    # 참고용 캐시(파생값과 동기)
+    updated_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                          onupdate=lambda: datetime.now(timezone.utc))
+
+
 class ExerciseLibrary(Base):
     """정적 데이터 — seed_exercises.py로 초기 적재, 이후 read-only"""
     __tablename__ = "exercise_library"
