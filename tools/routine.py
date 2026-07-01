@@ -116,12 +116,25 @@ def generate_routine(user_id: str, focus: str | None = None,
     """
     profile = _load_profile(user_id)
     history = _recent_workouts(user_id)
+    trend = _volume_trend(user_id)          # 분석 결과를 처방에 먹인다(#14)
+    deload = _is_deload(trend)
 
     split_label, targets = _decide_split(available_days, focus, history)
-    exercises = _build_exercises(targets, history, profile, session_minutes)
-    rationale = _rationale(user_id, profile, split_label, exercises)
+    exercises = _build_exercises(targets, history, profile, session_minutes, trend)
+    rationale = _rationale(profile, split_label, exercises, trend, deload)
 
     return {"split": split_label, "exercises": exercises, "rationale": rationale}
+
+
+def _volume_trend(user_id: str) -> dict:
+    """최근 30일 볼륨 추세(direction/flag)를 가져온다(처방·rationale 공유)."""
+    since = datetime.now().date() - timedelta(days=30)
+    return _trend_volume(user_id, since)
+
+
+def _is_deload(trend: dict) -> bool:
+    """볼륨 하락(down) 또는 정체(plateau) → 회복 주간(디로드)."""
+    return trend.get("direction") == "down" or trend.get("flag") == "plateau"
 
 
 def _load_profile(user_id: str):
@@ -189,11 +202,18 @@ def _name_blocked(name: str, patterns: list[str]) -> bool:
 
 
 def _build_exercises(targets: list[str], history, profile,
-                     session_minutes: int | None) -> list[dict]:
-    """타깃 부위별 종목 선택 + 목표별 sets/reps + 점진적 과부하 + 부상 회피."""
+                     session_minutes: int | None,
+                     trend: dict | None = None) -> list[dict]:
+    """타깃 부위별 종목 선택 + 목표별 sets/reps + 점진적 과부하 + 부상 회피.
+
+    볼륨 추세를 읽어 디로드/과부하를 분기한다(#14): 하락·정체면 세트 -1 + 무게 디로드.
+    """
     experience = normalize_experience(getattr(profile, "experience", None))
     goal = normalize_goal(getattr(profile, "goal", None))
     sets, reps = _sets_reps(goal, experience)
+    deload = _is_deload(trend or {})
+    if deload:
+        sets = max(1, sets - 1)          # 회복 주간: 세트 한 단계 낮춤
     last_idx = _last_weight_index(history)
     deprioritize, blocked = _injury_filters(getattr(profile, "injuries", None))
 
@@ -216,12 +236,13 @@ def _build_exercises(targets: list[str], history, profile,
         for ex in candidates[:per_target]:
             if len(result) >= total_cap:
                 return result
+            load, ex_reps = _progress(ex["name"], last_idx, part, reps, deload)
             result.append({
                 "exercise": ex["name"],            # 영문(출력 시 한글화)
                 "target": part,
                 "sets": sets,
-                "reps": reps,
-                "target_load": _progress(ex["name"], last_idx, part),
+                "reps": ex_reps,                   # 더블 프로그레션 시 렙 +1 될 수 있음
+                "target_load": load,
                 "form_cues": ex["form_cues"] or [],
             })
     return result
@@ -282,44 +303,59 @@ def _sets_reps(goal: str | None, experience: str | None) -> tuple[int, int]:
     return sets, reps
 
 
-def _last_weight_index(history) -> dict[str, float]:
-    """최근 기록에서 종목별 가장 최근 무게를 모은다(정규 한글명 기준).
+def _last_weight_index(history) -> dict[str, dict]:
+    """최근 기록에서 종목별 직전 세션(무게·세트·렙)을 모은다(정규 한글명 기준).
 
     로그 종목명은 parse_workout가 이미 정규화하지만, 별칭/영문 원문이 섞여도
     같은 공간(정규 한글)으로 모으도록 normalize_exercise를 한 번 더 태운다.
+    더블 프로그레션(#14)이 직전 렙을 보게 무게뿐 아니라 세트·렙도 보관한다.
     """
-    idx: dict[str, float] = {}
+    idx: dict[str, dict] = {}
     for log in history:  # history는 date desc → 먼저 본 게 최신
         for entry in (log.parsed or []):
             ex, w = entry.get("exercise"), entry.get("weight")
             if ex and w is not None:
                 key = normalize_exercise(ex)
                 if key not in idx:
-                    idx[key] = w
+                    idx[key] = {"weight": w,
+                                "sets": entry.get("sets"),
+                                "reps": entry.get("reps")}
     return idx
 
 
-def _progress(exercise_name: str, last_idx: dict[str, float],
-              part: str) -> float | None:
-    """직전 무게가 있으면 점진적 과부하 제안 중량을 계산한다.
+def _progress(exercise_name: str, last_idx: dict[str, dict],
+              part: str, base_reps: int,
+              deload: bool = False) -> tuple[float | None, int]:
+    """직전 기록으로 다음 처방 (target_load, reps)를 정한다.
 
-    처방 종목은 라이브러리 영문명, 로그(last_idx)는 정규 한글명이라
-    비교 전 영문 → 정규 한글로 변환해 같은 공간에서 매칭한다(끊김 A 제거, 이슈 #13).
-    큐레이션된 28종 대표만 변환되고, 매핑 안 된 종목은 None(회귀 없음).
+    - 브리지(#13): 처방 영문명 → 정규 한글로 변환 후 last_idx 조회. 큐레이션 28종만
+      매칭되고, 매핑/기록 없으면 (None, base_reps) — 첫 처방(회귀 없음).
+    - 더블 프로그레션(#14): 직전에 목표 렙(base_reps) 상단을 채웠으면 무게↑,
+      못 채웠으면 무게 유지 + 렙 +1.
+    - 디로드 주간이면 무게 -10%(회복), 렙은 목표로 리셋.
     """
     ko = lib_to_ko_canon(exercise_name)
     last = last_idx.get(ko) if ko is not None else None
     if last is None:                       # 브리지 미스 시 이름 직접 일치로 폴백
         last = last_idx.get(exercise_name)
     if last is None:
-        return None
+        return None, base_reps
+    w = last["weight"]
+    if deload:
+        return round(w * 0.9, 1), base_reps
     increment = 5.0 if part == "하체" else 2.5
-    return round(last + increment, 1)
+    last_reps = last.get("reps")
+    if last_reps is None or last_reps >= base_reps:
+        return round(w + increment, 1), base_reps   # 목표 렙 달성 → 무게↑
+    return w, last_reps + 1                          # 미달 → 무게 유지, 렙 +1
 
 
-def _rationale(user_id: str, profile, split_label: str,
-               exercises: list[dict]) -> str:
-    """profile.goal + 볼륨 추세로 처방 근거 한 문장(페르소나 중립)."""
+def _rationale(profile, split_label: str, exercises: list[dict],
+               trend: dict, deload: bool) -> str:
+    """profile.goal + 볼륨 추세로 처방 근거 한 문장(페르소나 중립).
+
+    디로드 주간이면 회복 의도를 명시해 '분석이 처방을 바꿨다'를 드러낸다(#14).
+    """
     goal = normalize_goal(getattr(profile, "goal", None))
     goal_phrase = {
         "증량": "근비대 중심으로 볼륨을 쌓는",
@@ -327,10 +363,10 @@ def _rationale(user_id: str, profile, split_label: str,
         "유지": "균형 있게 컨디션을 유지하는",
     }.get(goal, "기본기를 다지는")
 
-    since = datetime.now().date() - timedelta(days=30)
-    trend = _trend_volume(user_id, since)
     if trend.get("flag") == "insufficient_data":
         trend_phrase = "기록이 더 쌓이면 처방이 정밀해집니다"
+    elif deload:
+        trend_phrase = "최근 볼륨 흐름을 보고 이번 주는 세트·무게를 낮춘 회복 주간으로 구성했어요"
     else:
         trend_phrase = {
             "up": "최근 볼륨이 잘 오르고 있어 과부하 흐름을 이어갑니다",

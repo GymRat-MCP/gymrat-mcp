@@ -104,17 +104,46 @@ def _trend_weight(user_id: str, since) -> dict:
     return _with_persona(user_id, {"direction": direction, "summary": summary, "flag": None})
 
 
+_BW_FACTOR = 0.5   # 맨몸 컴파운드 볼륨 프록시 계수(체중의 절반을 유효 부하로 근사)
+
+
+def _user_bodyweight(user_id: str, default: float = 70.0) -> float:
+    """최근 체중 기록을 맨몸 볼륨 프록시용으로 가져온다(없으면 기본값)."""
+    session = SessionLocal()
+    try:
+        row = (session.query(WeightLog)
+               .filter(WeightLog.user_id == user_id)
+               .order_by(WeightLog.date.desc(), WeightLog.id.desc())
+               .first())
+    finally:
+        session.close()
+    w = getattr(row, "weight", None)
+    return float(w) if isinstance(w, (int, float)) else default
+
+
+def _session_volume_with_bw(parsed, bodyweight: float) -> float:
+    """세션 볼륨 = 웨이트 볼륨 + 맨몸 컴파운드 프록시(reps×체중×계수).
+
+    무게 None이라 session_volume이 빼버리는 풀업/딥스 등을 체중 프록시로 별도
+    합산 → 맨몸 위주 세션이 볼륨 0으로 빠져 '거짓 down'을 만드는 문제를 완화(#14).
+    """
+    total = session_volume(parsed)
+    for it in (parsed or []):
+        if it.get("weight") is None:
+            s, r = it.get("sets"), it.get("reps")
+            if s and r:
+                total += bodyweight * _BW_FACTOR * s * r
+    return total
+
+
 def _trend_volume(user_id: str, since) -> dict:
     # WorkoutLog.parsed에서 종목별 볼륨(weight*sets*reps) 합산 추세
     """ 운동 볼륨(weight×sets×reps) 추세를 분석한다.
 
         세션(날짜)별 총 볼륨을 만들고, 초반 절반 평균 vs 후반 절반 평균으로
-        방향성을 본다. 
+        방향성을 본다. 맨몸 컴파운드는 체중 프록시로 별도 집계(#14).
         가드레일: 정확 수치 단정 X → 방향성·질적 요약.
     """
-
-    # TODO: 맨몸 운동은 volume이 없는데 v1은 이대로 진행 추후 볼륨 산정 기준을 바꿀 수도 있음
-
     session = SessionLocal()
     try:
         logs = (
@@ -127,8 +156,19 @@ def _trend_volume(user_id: str, since) -> dict:
     finally:
         session.close()
 
-    # 세션별 총 볼륨 -> 0인 세션은 제외
-    volumes = [v for log in logs if (v := session_volume(log.parsed)) > 0]
+    # 세션별 총 볼륨(맨몸 프록시 포함) -> 0인 세션은 제외.
+    # 체중은 맨몸 항목이 있을 때만 lazy 조회(웨이트-only면 DB 왕복 0).
+    bodyweight = None
+    volumes = []
+    for log in logs:
+        has_bw = any(it.get("weight") is None and it.get("sets") and it.get("reps")
+                     for it in (log.parsed or []))
+        if has_bw and bodyweight is None:
+            bodyweight = _user_bodyweight(user_id)
+        v = (_session_volume_with_bw(log.parsed, bodyweight)
+             if has_bw else session_volume(log.parsed))
+        if v > 0:
+            volumes.append(v)
 
     if len(volumes) < 2:
         return _with_persona(user_id, {"direction": "flat",
