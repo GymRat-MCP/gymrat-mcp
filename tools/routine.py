@@ -4,12 +4,17 @@
 form_cues는 exercise_library에서 가져옴(영문 단계) → 출력 시 호스트 LLM이 한글화.
 """
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from db.session import SessionLocal
-from db.models import ExerciseLibrary, WorkoutLog, User
+from db.models import ExerciseLibrary, WorkoutLog, User, Program
 from tools.analysis import _trend_volume
 from tools.profile import normalize_goal, normalize_experience
 from tools.workout_parser import normalize_exercise
-from tools.exercise_map import lib_to_ko_canon
+from tools.exercise_map import (
+    lib_to_ko_canon, log_name_to_part, movement_pattern,
+)
+
+_WEEKLY_SET_TARGET = 10   # 부위별 주당 최소 세트 랜드마크(하한, #15-2)
 
 
 # ── 분할(split) 정의 ───────────────────────────────────────
@@ -116,14 +121,23 @@ def generate_routine(user_id: str, focus: str | None = None,
     """
     profile = _load_profile(user_id)
     history = _recent_workouts(user_id)
+    program = _get_or_create_program(user_id, available_days)   # 주기화(#15)
+    week, program_deload = _program_state(program)
     trend = _volume_trend(user_id)          # 분석 결과를 처방에 먹인다(#14)
-    deload = _is_deload(trend)
+    deload = _is_deload(trend) or program_deload   # 추세 or N주차 → 회복 주간
 
-    split_label, targets = _decide_split(available_days, focus, history)
-    exercises = _build_exercises(targets, history, profile, session_minutes, trend)
-    rationale = _rationale(profile, split_label, exercises, trend, deload)
+    days = program.split_type or available_days
+    split_label, targets = _decide_split(days, focus, history)
+    recent_parts = _recently_trained_parts(history)   # 48h 내 자극 부위 후순위(#15-2)
+    exercises = _build_exercises(targets, history, profile, session_minutes,
+                                 trend, recent_parts, deload)
+    balance = _weekly_balance(history)                # 주간 부위별 세트량(#15-2)
+    rationale = _rationale(profile, split_label, exercises, trend, deload, balance)
 
-    return {"split": split_label, "exercises": exercises, "rationale": rationale}
+    return {"split": split_label, "exercises": exercises, "rationale": rationale,
+            "week": week, "deload": deload,
+            "weekly_balance": balance,
+            "pattern_mix": _pattern_mix(exercises)}   # 하루 패턴 분포(#15-3)
 
 
 def _volume_trend(user_id: str) -> dict:
@@ -135,6 +149,79 @@ def _volume_trend(user_id: str) -> dict:
 def _is_deload(trend: dict) -> bool:
     """볼륨 하락(down) 또는 정체(plateau) → 회복 주간(디로드)."""
     return trend.get("direction") == "down" or trend.get("flag") == "plateau"
+
+
+# ── 주기화 프로그램 상태 (#15-1) ───────────────────────────
+def _get_or_create_program(user_id: str, available_days: int):
+    """유저의 활성 프로그램을 읽거나(없으면) 오늘 시작으로 생성한다.
+
+    세션 종료 후에도 안전하게 쓰도록 필요한 필드만 담은 값 객체를 반환한다.
+    """
+    days = max(1, min(6, available_days))
+    session = SessionLocal()
+    try:
+        prog = (session.query(Program)
+                .filter(Program.user_id == user_id).first())
+        if prog is None:
+            prog = Program(user_id=user_id, split_type=days,
+                           started_at=datetime.now().date(),
+                           deload_every=4, week_index=0)
+            session.add(prog)
+            session.commit()
+        return SimpleNamespace(split_type=prog.split_type,
+                               started_at=prog.started_at,
+                               deload_every=prog.deload_every or 4)
+    finally:
+        session.close()
+
+
+def _program_state(program) -> tuple[int, bool]:
+    """(현재 주차[1-base], 프로그램 디로드 여부)를 시작일 기준으로 파생한다."""
+    elapsed = (datetime.now().date() - program.started_at).days
+    week = elapsed // 7 + 1
+    every = program.deload_every or 4
+    return week, (week % every == 0)   # every의 배수 주차 = 자동 디로드
+
+
+# ── 회복/빈도 인지 (#15-2) ─────────────────────────────────
+def _recently_trained_parts(history, within_days: int = 2) -> set[str]:
+    """최근 within_days일(≈48h) 내 로그에서 자극한 부위 집합."""
+    today = datetime.now().date()
+    parts: set[str] = set()
+    for log in history:
+        d = getattr(log, "date", None)
+        if d is None or (today - d).days >= within_days:
+            continue
+        for entry in (log.parsed or []):
+            p = log_name_to_part(entry.get("exercise"))
+            if p:
+                parts.add(p)
+    return parts
+
+
+def _weekly_balance(history, within_days: int = 7) -> dict[str, int]:
+    """최근 within_days일 부위별 총 세트량(주간 볼륨 균형 리포트)."""
+    today = datetime.now().date()
+    bal: dict[str, int] = {}
+    for log in history:
+        d = getattr(log, "date", None)
+        if d is None or (today - d).days >= within_days:
+            continue
+        for entry in (log.parsed or []):
+            p = log_name_to_part(entry.get("exercise"))
+            s = entry.get("sets") or 0
+            if p and s:
+                bal[p] = bal.get(p, 0) + s
+    return bal
+
+
+def _pattern_mix(exercises: list[dict]) -> dict[str, int]:
+    """오늘 처방의 움직임 패턴 분포(#15-3)."""
+    mix: dict[str, int] = {}
+    for e in exercises:
+        p = e.get("pattern", "기타")
+        mix[p] = mix.get(p, 0) + 1
+    return mix
 
 
 def _load_profile(user_id: str):
@@ -203,21 +290,27 @@ def _name_blocked(name: str, patterns: list[str]) -> bool:
 
 def _build_exercises(targets: list[str], history, profile,
                      session_minutes: int | None,
-                     trend: dict | None = None) -> list[dict]:
-    """타깃 부위별 종목 선택 + 목표별 sets/reps + 점진적 과부하 + 부상 회피.
+                     trend: dict | None = None,
+                     recent_parts: set[str] | None = None,
+                     deload: bool | None = None) -> list[dict]:
+    """타깃 부위별 종목 선택 + 목표별 sets/reps + 점진적 과부하 + 부상/회복 회피.
 
-    볼륨 추세를 읽어 디로드/과부하를 분기한다(#14): 하락·정체면 세트 -1 + 무게 디로드.
+    - 볼륨 추세를 읽어 디로드/과부하 분기(#14): 하락·정체면 세트 -1 + 무게 디로드.
+      deload가 명시되면 그 값을 쓴다(프로그램 N주차 디로드 포함, #15).
+    - recent_parts(최근 48h 자극 부위)는 부상 부위처럼 뒤로 미룬다(#15-2).
     """
     experience = normalize_experience(getattr(profile, "experience", None))
     goal = normalize_goal(getattr(profile, "goal", None))
     sets, reps = _sets_reps(goal, experience)
-    deload = _is_deload(trend or {})
+    if deload is None:
+        deload = _is_deload(trend or {})
     if deload:
         sets = max(1, sets - 1)          # 회복 주간: 세트 한 단계 낮춤
     last_idx = _last_weight_index(history)
     deprioritize, blocked = _injury_filters(getattr(profile, "injuries", None))
+    deprioritize |= (recent_parts or set())   # 48h 내 자극 부위도 후순위
 
-    # 다친 부위는 뒤로 미룬다(완전 제외하면 빈 루틴 위험 → 순서만 낮춤)
+    # 다친/최근 자극 부위는 뒤로 미룬다(완전 제외하면 빈 루틴 위험 → 순서만 낮춤)
     ordered = ([t for t in targets if t not in deprioritize]
                + [t for t in targets if t in deprioritize])
 
@@ -240,6 +333,7 @@ def _build_exercises(targets: list[str], history, profile,
             result.append({
                 "exercise": ex["name"],            # 영문(출력 시 한글화)
                 "target": part,
+                "pattern": movement_pattern(ex["name"]),   # 밀기/당기기/... (#15-3)
                 "sets": sets,
                 "reps": ex_reps,                   # 더블 프로그레션 시 렙 +1 될 수 있음
                 "target_load": load,
@@ -351,10 +445,11 @@ def _progress(exercise_name: str, last_idx: dict[str, dict],
 
 
 def _rationale(profile, split_label: str, exercises: list[dict],
-               trend: dict, deload: bool) -> str:
+               trend: dict, deload: bool, balance: dict | None = None) -> str:
     """profile.goal + 볼륨 추세로 처방 근거 한 문장(페르소나 중립).
 
     디로드 주간이면 회복 의도를 명시해 '분석이 처방을 바꿨다'를 드러낸다(#14).
+    주간 부위 볼륨이 랜드마크에 못 미치면 보완 부위를 짚어준다(#15-2).
     """
     goal = normalize_goal(getattr(profile, "goal", None))
     goal_phrase = {
@@ -376,6 +471,9 @@ def _rationale(profile, split_label: str, exercises: list[dict],
 
     msg = (f"오늘은 {split_label} — {goal_phrase} 방향으로 "
            f"{len(exercises)}종 구성했어요. {trend_phrase}.")
+    low = sorted(p for p, s in (balance or {}).items() if s < _WEEKLY_SET_TARGET)
+    if low:
+        msg += f" 이번 주 {'·'.join(low)} 볼륨이 아직 적어 다음 세션에서 보완하면 좋아요."
     if getattr(profile, "injuries", None):
         msg += " 부상 이력을 반영해 해당 부위에 무리가 가는 동작은 빼고, 무게는 보수적으로 잡으세요."
     return msg
