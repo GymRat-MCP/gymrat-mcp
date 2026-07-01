@@ -56,27 +56,39 @@ def test_sets_reps_beginner_lowers_sets():
     assert routine._sets_reps("증량", "초보") == (3, 8)
 
 
-# ── _progress (점진적 과부하) ──────────────────────────────
+# ── _progress (점진적 과부하 + 더블 프로그레션) ────────────
 def test_progress_none_when_no_history():
-    assert routine._progress("barbell bench press", {}, "가슴") is None
+    assert routine._progress("barbell bench press", {}, "가슴", 8) == (None, 8)
 
 def test_progress_increment():
-    idx = {"barbell bench press": 80.0}
-    assert routine._progress("barbell bench press", idx, "가슴") == 82.5
+    # 직전 렙(reps 없음) → 목표 렙 달성으로 간주 → 무게↑
+    idx = {"barbell bench press": {"weight": 80.0, "sets": 5, "reps": None}}
+    assert routine._progress("barbell bench press", idx, "가슴", 8) == (82.5, 8)
 
 def test_progress_leg_bigger_increment():
-    idx = {"barbell full squat": 100.0}
-    assert routine._progress("barbell full squat", idx, "하체") == 105.0
+    idx = {"barbell full squat": {"weight": 100.0, "sets": 5, "reps": 8}}
+    assert routine._progress("barbell full squat", idx, "하체", 8) == (105.0, 8)
+
+def test_progress_double_progression_adds_rep():
+    # 직전 렙(6)이 목표(8) 미달 → 무게 유지, 렙 +1
+    idx = {"barbell bench press": {"weight": 80.0, "sets": 4, "reps": 6}}
+    assert routine._progress("barbell bench press", idx, "가슴", 8) == (80.0, 7)
+
+def test_progress_deload_drops_weight():
+    # 디로드 주간 → 무게 -10%, 렙은 목표 리셋
+    idx = {"barbell bench press": {"weight": 80.0, "sets": 5, "reps": 8}}
+    assert routine._progress("barbell bench press", idx, "가슴", 8, deload=True) == (72.0, 8)
 
 
 # ── _last_weight_index ─────────────────────────────────────
 def test_last_weight_index_takes_most_recent():
     # history는 date desc → 먼저 본 항목이 최신, 이후 같은 종목은 무시
     history = [
-        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 82.5}]),
-        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0}]),
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 82.5, "sets": 5, "reps": 5}]),
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0, "sets": 5, "reps": 8}]),
     ]
-    assert routine._last_weight_index(history) == {"벤치프레스": 82.5}
+    assert routine._last_weight_index(history) == {
+        "벤치프레스": {"weight": 82.5, "sets": 5, "reps": 5}}
 
 
 # ── _build_exercises (종목조회 monkeypatch) ────────────────
