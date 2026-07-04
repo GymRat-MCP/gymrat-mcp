@@ -4,6 +4,7 @@ from tools.persona import (
     DEFAULT_PERSONA,
     PERSONA_REWRITE_INSTRUCTION,
     SUPPORTED_PERSONAS,
+    USER_RESPONSE_INSTRUCTION,
     apply_persona,
     build_persona_context,
     persona_response_fields,
@@ -84,21 +85,53 @@ class PersonaHarnessTest(unittest.TestCase):
             with self.subTest(persona=persona):
                 fields = persona_response_fields(persona, base_message)
 
+                self.assertIn("assistant_message", fields)
+                self.assertIn("display_text", fields)
+                self.assertIn("message", fields)
+                self.assertNotEqual(fields["assistant_message"], base_message)
+                self.assertEqual(fields["display_text"], fields["assistant_message"])
+                self.assertEqual(fields["message"], fields["assistant_message"])
                 self.assertEqual(fields["base_message"], base_message)
                 self.assertEqual(fields["persona_context"]["name"], persona)
                 self.assertEqual(fields["rewrite_instruction"], PERSONA_REWRITE_INSTRUCTION)
                 self.assertIn("base_message", fields["rewrite_instruction"])
                 self.assertIn("가드레일", fields["rewrite_instruction"])
                 self.assertIn("말투", fields["rewrite_instruction"])
+                self.assertEqual(fields["response_meta"]["base_message"], base_message)
+                self.assertEqual(fields["response_meta"]["persona_context"]["name"], persona)
+                self.assertEqual(
+                    fields["response_meta"]["rewrite_instruction"],
+                    PERSONA_REWRITE_INSTRUCTION,
+                )
+                self.assertEqual(
+                    fields["user_response_contract"]["mode"],
+                    "use_assistant_message",
+                )
+                self.assertEqual(
+                    fields["user_response_contract"]["primary_field"],
+                    "assistant_message",
+                )
+                self.assertEqual(
+                    fields["user_response_contract"]["alias_fields"],
+                    ["display_text", "message"],
+                )
+                self.assertEqual(
+                    fields["user_response_contract"]["instruction"],
+                    USER_RESPONSE_INSTRUCTION,
+                )
 
     def test_unknown_persona_falls_back_to_default_contract(self):
         context = build_persona_context("무리수")
         fields = persona_response_fields("무리수", "기본 피드백")
         rendered = apply_persona("기본 피드백", "무리수")
 
+        self.assertEqual(DEFAULT_PERSONA, "천사")
         self.assertEqual(context["name"], DEFAULT_PERSONA)
         self.assertEqual(fields["persona_context"]["name"], DEFAULT_PERSONA)
-        self.assertIn("코치모드", rendered)
+        self.assertEqual(fields["assistant_message"], rendered)
+        self.assertEqual(fields["display_text"], rendered)
+        self.assertEqual(fields["message"], rendered)
+        self.assertIn("천사모드", rendered)
 
     def test_compatibility_rendering_matches_persona_expectations(self):
         base_message = "탄수화물과 곁들임은 보여요. 다음 끼니엔 단백질을 보강해봐요."

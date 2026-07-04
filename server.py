@@ -50,7 +50,8 @@ def log_inbody(user_id: str, weight: float | None = None,
                body_fat_pct: float | None = None,
                measured_date: str | None = None,
                raw_note: str | None = None) -> dict:
-    """인바디 사진에서 추출한 수치를 저장하고 프로필에 반영한다."""
+    """인바디 사진에서 추출한 수치를 저장하고 프로필에 반영한다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return logging_tools.log_inbody(user_id, weight, skeletal_muscle,
                                     body_fat_pct, measured_date, raw_note)
 
@@ -66,6 +67,7 @@ def log_workout(user_id: str, raw_text: str,
     {exercise: str, weight: float|null, sets: int|null, reps: int|null}.
     맨몸운동은 weight=null. 반드시 exercise/weight/sets/reps 키로 분해해 넘겨라.
     confirm_with_history=True(기본)면 weight 누락 시 이전 기록에서 자동으로 채운다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다.
     """
     return logging_tools.log_workout(
         user_id, raw_text, exercises, date, confirm_with_history)
@@ -74,15 +76,35 @@ def log_workout(user_id: str, raw_text: str,
 @mcp.tool()
 def log_meal(user_id: str, photo_analysis: str,
              meal_time: str | None = None) -> dict:
-    """식단 사진 분석 결과를 저장하고 질적 코멘트를 단다(수치 처방 X)."""
+    """식단 텍스트를 저장하고 질적 코멘트를 단다(수치 처방 X).
+    photo_analysis는 기존 호환용 이름이며, 사진 분석이 없으면 사용자의 식단 원문을 넣는다.
+    응답에 pending_confirmation=true가 있으면 사용자에게 assistant_message로 확인 질문을 하고,
+    답변을 confirm_meal_details로 넘겨 최종 저장한다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return logging_tools.log_meal(user_id, photo_analysis, meal_time)
+
+
+@mcp.tool()
+def confirm_meal_details(
+    user_id: str,
+    original_meal_text: str,
+    clarification_text: str,
+    meal_time: str | None = None,
+) -> dict:
+    """애매한 식단 기록의 보충 답변을 받아 최종 저장한다.
+    log_meal이 pending_confirmation=true를 반환했을 때 사용한다.
+    original_meal_text에는 최초 식단 원문, clarification_text에는 사용자의 추가 답변을 넣는다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
+    return logging_tools.confirm_meal_details(
+        user_id, original_meal_text, clarification_text, meal_time)
 
 
 # ---- 분석 ----
 @mcp.tool()
 def analyze_trend(user_id: str, metric: str = "weight",
                   period_days: int = 30) -> dict:
-    """추세 분석. metric: weight|volume|inbody|meal."""
+    """추세 분석. metric: weight|volume|inbody|meal.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return analysis.analyze_trend(user_id, metric, period_days)
 
 
@@ -95,7 +117,8 @@ def generate_routine(user_id: str, focus: str | None = None,
     focus(선택): 반드시 한글 부위명 하나로 — 가슴|등|어깨|하체|이두|삼두|팔|코어|종아리.
     "lower body" 같은 영문/변형은 내부에서 한글로 매핑하며, 미지정·미인식 시
     available_days(1~6, 범위 밖은 클램프) 기반 분할로 폴백한다(빈 루틴 반환 안 함).
-    session_minutes: 분 단위(종목 수 산정에 사용)."""
+    session_minutes: 분 단위(종목 수 산정에 사용).
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return routine.generate_routine(user_id, focus, available_days, session_minutes)
 
 
@@ -103,14 +126,41 @@ def generate_routine(user_id: str, focus: str | None = None,
 def generate_meal_plan(user_id: str, goal_override: str | None = None,
                        preferences: str | None = None,
                        schedule: list[str] | None = None) -> dict:
-    """질적 식단 가이드를 끼니별로 구성하고 톡캘린더 알림 이벤트를 만든다."""
+    """질적 식단 가이드를 끼니별로 구성하고 톡캘린더 알림 이벤트를 만든다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return coaching.generate_meal_plan(user_id, goal_override, preferences, schedule)
 
 
 @mcp.tool()
-def get_recommendation(user_id: str) -> dict:
-    """식단·추세·방향성을 종합한 질적 코칭 한 마디."""
-    return coaching.get_recommendation(user_id)
+def suggest_meal_adjustment(
+    user_id: str,
+    current_meal_text: str | None = None,
+    meal_time: str | None = None,
+    goal_override: str | None = None,
+    current_context: dict | None = None,
+) -> dict:
+    """현재 식사·최근 식단·몸 정보·운동량을 묶어 질적 식단 조정을 제안한다.
+    current_context에는 이번 대화에서 입력받은 height_cm, weight_kg,
+    weekly_sessions 같은 값을 넣는다. BMI는 참고 신호로만 쓰며 수치 처방은 하지 않는다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
+    return coaching.suggest_meal_adjustment(
+        user_id, current_meal_text, meal_time, goal_override, current_context)
+
+
+@mcp.tool()
+def get_recommendation(
+    user_id: str,
+    persona_override: str | None = None,
+    goal_override: str | None = None,
+    current_context: dict | None = None,
+) -> dict:
+    """식단·추세·방향성을 종합한 질적 코칭 한 마디.
+    current_context에는 이번 대화에서 입력받은 수치 데이터(예: weekly_sessions,
+    target_weekly_sessions, session_minutes, fatigue, sleep_quality)를 넣는다.
+    current_context/persona_override/goal_override는 DB 기본값보다 우선한다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
+    return coaching.get_recommendation(
+        user_id, persona_override, goal_override, current_context)
 
 
 if __name__ == "__main__":

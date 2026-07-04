@@ -6,7 +6,7 @@ training guardrails.
 from db.session import SessionLocal
 from db.models import User
 
-DEFAULT_PERSONA = "코치"
+DEFAULT_PERSONA = "천사"
 
 PERSONA_CONTEXTS = {
     "악마": {
@@ -27,7 +27,7 @@ PERSONA_CONTEXTS = {
             "정확한 칼로리나 그램 강제",
         ],
     },
-    "천사": {
+    DEFAULT_PERSONA: {
         "name": "천사",
         "role": "부담을 낮추고 지속을 돕는 다정한 코치",
         "tone": "부드럽고 안심시키는 말투",
@@ -63,8 +63,8 @@ PERSONA_CONTEXTS = {
             "정확한 칼로리나 그램 강제",
         ],
     },
-    DEFAULT_PERSONA: {
-        "name": DEFAULT_PERSONA,
+    "코치": {
+        "name": "코치",
         "role": "운동 동기를 강하게 살려주는 코치",
         "tone": "운동 밈 느낌의 짧고 힘 있는 말투",
         "intensity": "medium",
@@ -91,18 +91,29 @@ PERSONA_REWRITE_INSTRUCTION = (
     "페르소나는 말투에만 반영한다."
 )
 
+USER_RESPONSE_INSTRUCTION = (
+    "사용자에게 답할 때는 assistant_message를 최우선으로 사용한다. "
+    "host가 assistant_message를 인식하지 못하면 display_text 또는 message를 "
+    "같은 최종 사용자 문장으로 사용한다. base_message는 내부 참고용 원문이며 "
+    "단독으로 사용자에게 출력하지 않는다."
+)
+
 
 def get_persona(user_id: str) -> str:
     session = SessionLocal()
     try:
         user = session.get(User, user_id)
-        return user.persona if user and user.persona else DEFAULT_PERSONA
+        return normalize_persona(user.persona if user else None)
     finally:
         session.close()
 
 
+def normalize_persona(persona: str | None) -> str:
+    return persona if persona in PERSONA_CONTEXTS else DEFAULT_PERSONA
+
+
 def build_persona_context(persona: str | None) -> dict:
-    normalized = persona if persona in PERSONA_CONTEXTS else DEFAULT_PERSONA
+    normalized = normalize_persona(persona)
     context = PERSONA_CONTEXTS[normalized]
     return {
         **context,
@@ -115,11 +126,37 @@ def build_persona_context(persona: str | None) -> dict:
     }
 
 
-def persona_response_fields(persona: str | None, base_message: str) -> dict:
+def user_response_contract(fallback_field: str | None = None) -> dict:
     return {
+        "mode": "use_assistant_message",
+        "primary_field": "assistant_message",
+        "alias_fields": ["display_text", "message"],
+        "fallback_field": fallback_field,
+        "instruction": USER_RESPONSE_INSTRUCTION,
+    }
+
+
+def persona_response_fields(
+    persona: str | None,
+    base_message: str,
+    assistant_message: str | None = None,
+    fallback_field: str | None = None,
+) -> dict:
+    rendered_message = assistant_message or apply_persona(base_message, persona)
+    context = build_persona_context(persona)
+    return {
+        "assistant_message": rendered_message,
+        "display_text": rendered_message,
+        "message": rendered_message,
         "base_message": base_message,
-        "persona_context": build_persona_context(persona),
+        "persona_context": context,
         "rewrite_instruction": PERSONA_REWRITE_INSTRUCTION,
+        "response_meta": {
+            "base_message": base_message,
+            "persona_context": context,
+            "rewrite_instruction": PERSONA_REWRITE_INSTRUCTION,
+        },
+        "user_response_contract": user_response_contract(fallback_field),
     }
 
 
@@ -131,6 +168,6 @@ def apply_persona(text: str, persona: str | None) -> str:
         "악마": "악마모드: {text} 변명은 여기까지. 대충 넘기면 몸은 바로 티 냅니다. 지금 할 것부터 끝내요.",
         "천사": "천사모드: {text} 천천히 해도 괜찮으니, 오늘 한 가지만 챙겨봐요.",
         "현실파이터": "현실파이터: {text} 완벽 말고, 지금 가능한 선택부터 갑시다.",
-        DEFAULT_PERSONA: "코치모드: {text} 운동 많이 될 거야. 스트레스 조금 받을 거야. 그래도 오늘 할 거 하면 몸은 좋아질 거야.",
+        "코치": "코치모드: {text} 운동 많이 될 거야. 스트레스 조금 받을 거야. 그래도 오늘 할 거 하면 몸은 좋아질 거야.",
     }
     return templates.get(persona, templates[DEFAULT_PERSONA]).format(text=text)

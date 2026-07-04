@@ -2,7 +2,14 @@
 from datetime import date as date_cls, datetime
 from db.session import SessionLocal
 from db.models import WeightLog, InbodyLog, WorkoutLog, MealLog, User
-from tools.persona import apply_persona, get_persona, persona_response_fields
+from tools.persona import (
+    DEFAULT_PERSONA,
+    apply_persona,
+    get_persona,
+    normalize_persona,
+    persona_response_fields,
+)
+from tools.meal_intel import classify_meal_text, meal_feedback
 from tools.workout_parser import (
     parse_workout, normalize_exercise, needs_confirmation,
 )
@@ -47,37 +54,66 @@ def _inbody_note(previous: InbodyLog | None, current: InbodyLog) -> str:
 
 
 def _meal_quality_note(photo_analysis: str) -> str:
-    text = (photo_analysis or "").lower()
-    protein_words = ["단백질", "닭", "계란", "달걀", "고기", "소고기", "돼지", "생선",
-                     "연어", "참치", "두부", "콩", "그릭요거트", "요거트", "쉐이크"]
-    veggie_words = ["채소", "야채", "샐러드", "나물", "브로콜리", "양배추", "상추",
-                    "오이", "토마토", "김치", "버섯"]
-    carb_words = ["밥", "현미", "쌀", "고구마", "감자", "빵", "면", "파스타",
-                  "오트", "시리얼", "떡"]
+    return meal_feedback(classify_meal_text(photo_analysis))
 
-    has_protein = any(word in text for word in protein_words)
-    has_veggie = any(word in text for word in veggie_words)
-    has_carb = any(word in text for word in carb_words)
 
-    missing = []
-    if not has_protein:
-        missing.append("단백질")
-    if not has_veggie:
-        missing.append("채소")
-    if not has_carb:
-        missing.append("탄수화물")
+def _recent_meal_classifications(session, user_id: str, limit: int = 8) -> list[dict]:
+    logs = (
+        session.query(MealLog)
+        .filter(MealLog.user_id == user_id)
+        .order_by(MealLog.logged_at.desc(), MealLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        classify_meal_text(log.photo_analysis or "")
+        for log in logs
+    ]
 
-    if not missing:
-        return "단백질, 채소, 탄수화물 구성이 꽤 균형 있어 보여요. 이 흐름 유지해봐요."
-    if len(missing) == 3:
-        return "사진 설명만으로는 구성이 선명하지 않아요. 다음 기록엔 주된 단백질, 채소, 탄수화물을 같이 알려주세요."
-    if missing == ["탄수화물"]:
-        return "단백질과 채소는 괜찮아 보여요. 운동 전후라면 탄수화물도 적당히 챙기면 좋아요."
-    if missing == ["채소"]:
-        return "주요 에너지원은 있어 보여요. 다음 끼니엔 채소를 더해 포만감과 균형을 챙겨봐요."
-    if missing == ["단백질"]:
-        return "탄수화물과 곁들임은 보여요. 근육 회복을 위해 다음 끼니엔 단백질을 보강해봐요."
-    return f"{'·'.join(missing)} 쪽이 조금 비어 보여요. 다음 끼니에서 부족한 축만 보완하면 됩니다."
+
+def _meal_requires_confirmation(classification: dict) -> bool:
+    return (
+        classification.get("confidence") == "low"
+        or classification.get("balance_flag") in {"unclear", "needs_more_info"}
+    )
+
+
+def _pending_meal_payload(
+    user_id: str,
+    meal_text: str,
+    meal_time: str | None,
+    classification: dict,
+) -> dict:
+    return {
+        "user_id": user_id,
+        "original_meal_text": meal_text,
+        "meal_time": meal_time or classification.get("meal_time_detected"),
+        "questions": classification.get("follow_up_questions", []),
+        "confidence": classification.get("confidence"),
+        "balance_flag": classification.get("balance_flag"),
+        "classification": classification,
+    }
+
+
+def _save_meal_record(
+    session,
+    user_id: str,
+    meal_text: str,
+    meal_time: str | None,
+    qualitative_note: str,
+) -> None:
+    session.add(MealLog(
+        user_id=user_id, meal_time=meal_time,
+        photo_analysis=meal_text, qualitative_note=qualitative_note,
+    ))
+
+
+def _meal_confirmation_note(classification: dict) -> str:
+    question = (
+        classification.get("follow_up_questions")
+        or ["식단 구성을 조금만 더 알려주세요."]
+    )[0]
+    return f"이 식단은 아직 단정하기 어려워요. {question}"
 
 
 def log_weight(user_id: str, weight: float, body_fat: float | None = None,
@@ -138,7 +174,7 @@ def log_inbody(user_id: str, weight: float | None = None,
             summary_parts.append(f"체지방률 {body_fat_pct:.1f}%")
         user.summary_context = " / ".join(summary_parts)
 
-        persona = user.persona or "코치"
+        persona = normalize_persona(user.persona or DEFAULT_PERSONA)
         base_note = _inbody_note(previous, current)
         note = apply_persona(base_note, persona)
         session.commit()
@@ -148,7 +184,8 @@ def log_inbody(user_id: str, weight: float | None = None,
             "persona": persona,
             "note": note,
             "base_note": base_note,
-            **persona_response_fields(persona, base_note),
+            **persona_response_fields(
+                persona, base_note, note, fallback_field="note"),
         }
     except Exception as e:
         session.rollback()
@@ -188,6 +225,30 @@ def _fill_from_history(session, user_id: str, parsed: list[dict]) -> list[str]:
     return auto_filled
 
 
+def _workout_log_note(
+    parsed: list[dict],
+    needs: list[dict],
+    auto_filled: list[str],
+) -> str:
+    valid_items = [item for item in (parsed or []) if item.get("exercise")]
+    if not valid_items:
+        return "운동 기록을 저장했어요. 다음 기록에는 운동명, 무게, 세트, 반복을 같이 알려주면 더 정확하게 볼게요."
+
+    names = [item["exercise"] for item in valid_items[:3]]
+    suffix = "" if len(valid_items) <= 3 else f" 외 {len(valid_items) - 3}개"
+    if needs:
+        return (
+            f"{', '.join(names)}{suffix} 기록을 저장했어요. "
+            "다만 빠진 무게·세트·반복이 있어 다음 처방 전에 한 번 더 확인하면 좋아요."
+        )
+    if auto_filled:
+        return (
+            f"{', '.join(names)}{suffix} 기록을 저장했어요. "
+            "비어 있던 무게는 이전 기록을 참고해 채웠어요."
+        )
+    return f"{', '.join(names)}{suffix} 기록을 저장했어요. 다음 처방에 바로 반영할게요."
+
+
 def log_workout(user_id: str, raw_text: str,
                 exercises: list[dict] | None = None,
                 date: str | None = None,
@@ -207,6 +268,7 @@ def log_workout(user_id: str, raw_text: str,
     for item in parsed:
         item["exercise"] = normalize_exercise(item.get("exercise", ""))
 
+    persona = get_persona(user_id)
     session = SessionLocal()
     try:
         auto_filled = (_fill_from_history(session, user_id, parsed)
@@ -218,12 +280,22 @@ def log_workout(user_id: str, raw_text: str,
             raw_text=raw_text, parsed=parsed,
         ))
         session.commit()
+        base_note = _workout_log_note(parsed, needs, auto_filled)
+        note = apply_persona(base_note, persona)
         return {"parsed": parsed, "needs_confirmation": needs,
-                "auto_filled": auto_filled, "saved": True}
+                "auto_filled": auto_filled, "saved": True,
+                "persona": persona, "note": note, "base_note": base_note,
+                **persona_response_fields(
+                    persona, base_note, note, fallback_field="note")}
     except Exception as e:
         session.rollback()
+        base_note = "운동 기록 저장에 실패했어요. 입력 내용을 한 번만 다시 확인해볼게요."
+        note = apply_persona(base_note, persona)
         return {"parsed": parsed, "needs_confirmation": needs_confirmation(parsed),
-                "auto_filled": [], "saved": False, "error": str(e)}
+                "auto_filled": [], "saved": False, "error": str(e),
+                "persona": persona, "note": note, "base_note": base_note,
+                **persona_response_fields(
+                    persona, base_note, note, fallback_field="note")}
     finally:
         session.close()
 
@@ -231,30 +303,138 @@ def log_workout(user_id: str, raw_text: str,
 
 def log_meal(user_id: str, photo_analysis: str,
             meal_time: str | None = None) -> dict:
-    """식단 사진 분석 결과(호스트 LLM 텍스트)를 저장하고 질적 코멘트를 단다.
+    """식단 텍스트를 저장하고 질적 코멘트를 단다.
 
+    photo_analysis는 기존 호환용 파라미터명이다. 사진 분석이 없는 호스트에서는
+    사용자가 말한 식단 원문을 그대로 넘기면 된다.
     ⚠️ 가드레일: 정확 칼로리/그램 수치 ❌ → 질적 코칭만.
     """
     persona = get_persona(user_id)
-    base_note = _meal_quality_note(photo_analysis)
-    qualitative_note = apply_persona(base_note, persona)
 
     session = SessionLocal()
     try:
-        session.add(MealLog(
-            user_id=user_id, meal_time=meal_time,
-            photo_analysis=photo_analysis, qualitative_note=qualitative_note,
-        ))
+        recent_classifications = _recent_meal_classifications(session, user_id)
+        classification = classify_meal_text(
+            photo_analysis,
+            meal_time=meal_time,
+            recent_classifications=recent_classifications,
+        )
+        if _meal_requires_confirmation(classification):
+            base_note = _meal_confirmation_note(classification)
+            qualitative_note = apply_persona(base_note, persona)
+            return {
+                "saved": False,
+                "pending_confirmation": True,
+                "confirmation_required": True,
+                "persona": persona,
+                "meal_text": photo_analysis,
+                **classification,
+                "pending_meal_confirmation": _pending_meal_payload(
+                    user_id, photo_analysis, meal_time, classification),
+                "qualitative_note": qualitative_note,
+                "base_qualitative_note": base_note,
+                **persona_response_fields(
+                    persona, base_note, qualitative_note,
+                    fallback_field="qualitative_note"),
+            }
+
+        base_note = meal_feedback(classification)
+        qualitative_note = apply_persona(base_note, persona)
+        _save_meal_record(
+            session, user_id, photo_analysis,
+            meal_time or classification.get("meal_time_detected"),
+            qualitative_note,
+        )
         session.commit()
         return {
             "saved": True,
+            "pending_confirmation": False,
+            "confirmation_required": False,
             "persona": persona,
+            "meal_text": photo_analysis,
+            **classification,
             "qualitative_note": qualitative_note,
             "base_qualitative_note": base_note,
-            **persona_response_fields(persona, base_note),
+            **persona_response_fields(
+                persona, base_note, qualitative_note,
+                fallback_field="qualitative_note"),
         }
     except Exception as e:
         session.rollback()
         return {"saved": False, "error": str(e)}
+    finally:
+        session.close()
+
+
+def confirm_meal_details(
+    user_id: str,
+    original_meal_text: str,
+    clarification_text: str,
+    meal_time: str | None = None,
+) -> dict:
+    """보충 답변을 받아 2-step 식단 기록을 최종 저장한다."""
+    persona = get_persona(user_id)
+    combined_meal_text = (
+        f"{original_meal_text}. 보충: {clarification_text}"
+        if clarification_text else original_meal_text
+    )
+
+    session = SessionLocal()
+    try:
+        recent_classifications = _recent_meal_classifications(session, user_id)
+        classification = classify_meal_text(
+            combined_meal_text,
+            meal_time=meal_time,
+            recent_classifications=recent_classifications,
+        )
+        if _meal_requires_confirmation(classification):
+            base_note = _meal_confirmation_note(classification)
+            qualitative_note = apply_persona(base_note, persona)
+            return {
+                "saved": False,
+                "pending_confirmation": True,
+                "confirmation_required": True,
+                "confirmed": False,
+                "persona": persona,
+                "meal_text": combined_meal_text,
+                "original_meal_text": original_meal_text,
+                "clarification_text": clarification_text,
+                **classification,
+                "pending_meal_confirmation": _pending_meal_payload(
+                    user_id, original_meal_text, meal_time, classification),
+                "qualitative_note": qualitative_note,
+                "base_qualitative_note": base_note,
+                **persona_response_fields(
+                    persona, base_note, qualitative_note,
+                    fallback_field="qualitative_note"),
+            }
+
+        base_note = meal_feedback(classification)
+        qualitative_note = apply_persona(base_note, persona)
+        _save_meal_record(
+            session, user_id, combined_meal_text,
+            meal_time or classification.get("meal_time_detected"),
+            qualitative_note,
+        )
+        session.commit()
+        return {
+            "saved": True,
+            "pending_confirmation": False,
+            "confirmation_required": False,
+            "confirmed": True,
+            "persona": persona,
+            "meal_text": combined_meal_text,
+            "original_meal_text": original_meal_text,
+            "clarification_text": clarification_text,
+            **classification,
+            "qualitative_note": qualitative_note,
+            "base_qualitative_note": base_note,
+            **persona_response_fields(
+                persona, base_note, qualitative_note,
+                fallback_field="qualitative_note"),
+        }
+    except Exception as e:
+        session.rollback()
+        return {"saved": False, "confirmed": False, "error": str(e)}
     finally:
         session.close()

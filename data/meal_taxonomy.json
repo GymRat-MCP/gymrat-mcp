@@ -1,0 +1,230 @@
+{
+  "source_note": "Qualitative meal taxonomy for GymRat MCP text-based meal logging. Seeded from common Korean meal records and informed by open food-product dataset categories; used for tags and confidence only, not calorie or gram prescriptions.",
+  "external_reference_policy": {
+    "mode": "auxiliary_only",
+    "reason": "Open food-product datasets are useful for packaged foods, but Korean home/restaurant meals need qualitative parsing and user follow-up.",
+    "allowed_use": [
+      "keyword enrichment",
+      "packaged-food category hints",
+      "future offline taxonomy refresh"
+    ],
+    "disallowed_use": [
+      "runtime dependency for user response",
+      "exact calorie prescription",
+      "exact gram prescription"
+    ]
+  },
+  "meal_times": {
+    "아침": ["아침", "조식", "모닝"],
+    "점심": ["점심", "런치", "낮"],
+    "저녁": ["저녁", "석식", "밤"],
+    "간식": ["간식", "야식", "후식", "디저트"]
+  },
+  "portion_hints": {
+    "small": ["조금", "약간", "한입", "반", "반공기", "소량", "가볍게"],
+    "normal": ["한공기", "한 공기", "한그릇", "한 그릇", "한줄", "한 줄", "한개", "한 개", "하나", "1개"],
+    "large": ["많이", "두공기", "두 공기", "두그릇", "두 그릇", "곱빼기", "대짜", "폭식"],
+    "unknown": ["대충", "적당히", "그냥"]
+  },
+  "modifiers": {
+    "fried": ["튀김", "튀긴", "후라이드", "치킨", "돈까스", "감자튀김", "탕수육", "핫도그", "크로켓"],
+    "soup": ["국", "탕", "찌개", "전골", "라멘", "라면"],
+    "sauce_heavy": ["양념", "소스", "마요", "크림", "달달", "매콤", "드레싱"],
+    "processed": ["햄", "소시지", "스팸", "즉석", "편의점", "가공식품", "컵라면"],
+    "grilled_or_plain": ["구이", "삶은", "찐", "데친", "구운", "생"]
+  },
+  "uncertainty_terms": [
+    "대충",
+    "아무거나",
+    "도시락",
+    "집밥",
+    "외식",
+    "정식",
+    "뷔페",
+    "배달",
+    "분식",
+    "잘 모르",
+    "기억 안"
+  ],
+  "dishes": {
+    "김밥": {
+      "keywords": ["김밥"],
+      "axes": ["carb", "vegetable"],
+      "categories": ["main_food"],
+      "risk_flags": [],
+      "confidence": 0.68,
+      "notes": "속재료에 따라 단백질이 달라져 단백질은 확정하지 않는다."
+    },
+    "비빔밥": {
+      "keywords": ["비빔밥"],
+      "axes": ["carb", "vegetable"],
+      "categories": ["main_food"],
+      "risk_flags": [],
+      "confidence": 0.74,
+      "notes": "계란/고기 언급이 없으면 단백질은 확정하지 않는다."
+    },
+    "볶음밥": {
+      "keywords": ["볶음밥"],
+      "axes": ["carb"],
+      "categories": ["main_food"],
+      "risk_flags": ["oil_heavy"],
+      "confidence": 0.68,
+      "notes": "주재료가 명확하지 않아 채소/단백질은 추가 입력이 필요할 수 있다."
+    },
+    "샐러드": {
+      "keywords": ["샐러드"],
+      "axes": ["vegetable"],
+      "categories": ["side", "main_food"],
+      "risk_flags": [],
+      "confidence": 0.72,
+      "notes": "닭가슴살, 계란, 두부 등이 언급되면 단백질을 추가한다."
+    },
+    "편의점 도시락": {
+      "keywords": ["편의점 도시락", "도시락"],
+      "axes": [],
+      "categories": ["main_food", "packaged_food"],
+      "risk_flags": ["processed"],
+      "confidence": 0.38,
+      "notes": "구성이 넓어 추가 질문이 필요하다."
+    },
+    "라면": {
+      "keywords": ["라면", "컵라면"],
+      "axes": ["carb"],
+      "categories": ["main_food", "packaged_food"],
+      "risk_flags": ["processed", "soup"],
+      "confidence": 0.72,
+      "notes": "계란/두부/고기 추가 언급이 없으면 단백질은 확정하지 않는다."
+    },
+    "닭가슴살 샐러드": {
+      "keywords": ["닭가슴살 샐러드"],
+      "axes": ["protein", "vegetable"],
+      "categories": ["main_food"],
+      "risk_flags": [],
+      "confidence": 0.9,
+      "notes": "탄수화물 동반 여부만 확인하면 좋다."
+    }
+  },
+  "categories": {
+    "protein": {
+      "label": "단백질",
+      "role": "core_axis",
+      "keywords": [
+        "단백질",
+        "닭",
+        "닭가슴살",
+        "계란",
+        "달걀",
+        "고기",
+        "소고기",
+        "돼지",
+        "돼지고기",
+        "삼겹살",
+        "목살",
+        "제육",
+        "불고기",
+        "생선",
+        "연어",
+        "참치",
+        "오징어",
+        "새우",
+        "두부",
+        "콩",
+        "그릭요거트",
+        "요거트",
+        "프로틴",
+        "쉐이크",
+        "우유",
+        "치즈"
+      ]
+    },
+    "carb": {
+      "label": "탄수화물",
+      "role": "core_axis",
+      "keywords": [
+        "밥",
+        "쌀",
+        "현미",
+        "잡곡",
+        "김밥",
+        "덮밥",
+        "비빔밥",
+        "볶음밥",
+        "죽",
+        "고구마",
+        "감자",
+        "빵",
+        "샌드위치",
+        "토스트",
+        "면",
+        "라면",
+        "국수",
+        "파스타",
+        "오트",
+        "오트밀",
+        "시리얼",
+        "떡",
+        "또띠아"
+      ]
+    },
+    "vegetable": {
+      "label": "채소",
+      "role": "core_axis",
+      "keywords": [
+        "채소",
+        "야채",
+        "샐러드",
+        "나물",
+        "브로콜리",
+        "양배추",
+        "상추",
+        "오이",
+        "토마토",
+        "김치",
+        "버섯",
+        "파프리카",
+        "시금치",
+        "깻잎",
+        "양파",
+        "당근",
+        "콩나물",
+        "숙주",
+        "쌈"
+      ]
+    },
+    "fruit": {
+      "label": "과일",
+      "role": "extra",
+      "keywords": ["사과", "바나나", "딸기", "블루베리", "귤", "오렌지", "포도", "배", "복숭아", "과일"]
+    },
+    "sweet_drink": {
+      "label": "달달한 음료",
+      "role": "risk",
+      "keywords": ["라떼", "프라푸치노", "주스", "탄산", "콜라", "사이다", "스무디", "달달한 음료", "버블티"]
+    },
+    "dessert": {
+      "label": "디저트",
+      "role": "risk",
+      "keywords": ["케이크", "쿠키", "과자", "초콜릿", "아이스크림", "도넛", "디저트", "빵과자"]
+    },
+    "fried": {
+      "label": "튀김류",
+      "role": "risk",
+      "keywords": ["튀김", "치킨", "돈까스", "감자튀김", "탕수육", "핫도그", "크로켓"]
+    },
+    "processed": {
+      "label": "가공식품",
+      "role": "risk",
+      "keywords": ["햄", "소시지", "스팸", "라면", "즉석", "편의점", "가공식품", "컵라면"]
+    },
+    "alcohol": {
+      "label": "술",
+      "role": "risk",
+      "keywords": ["술", "맥주", "소주", "와인", "막걸리", "하이볼"]
+    },
+    "skipped": {
+      "label": "결식",
+      "role": "state",
+      "keywords": ["안 먹", "안먹", "굶", "커피만", "물만", "건너", "결식"]
+    }
+  }
+}
