@@ -6,6 +6,7 @@
 from datetime import datetime, time, timedelta
 from db.session import SessionLocal
 from db.models import WeightLog, WorkoutLog, InbodyLog, MealLog
+from tools.meal_intel import classify_meal_text, summarize_meal_classifications
 from tools.persona import apply_persona, get_persona, persona_response_fields
 from tools.workout_parser import session_volume
 
@@ -31,25 +32,29 @@ def analyze_trend(user_id: str, metric: str = "weight",
         return _trend_meal(user_id, since)
     persona = get_persona(user_id)
     base_summary = "지원하지 않는 지표"
+    summary = apply_persona(base_summary, persona)
     return {
         "direction": "flat",
-        "summary": apply_persona(base_summary, persona),
+        "summary": summary,
         "base_summary": base_summary,
         "flag": None,
         "persona": persona,
-        **persona_response_fields(persona, base_summary),
+        **persona_response_fields(
+            persona, base_summary, summary, fallback_field="summary"),
     }
 
 
 def _with_persona(user_id: str, result: dict) -> dict:
     persona = get_persona(user_id)
     base_summary = result["summary"]
+    summary = apply_persona(base_summary, persona)
     return {
         **result,
-        "summary": apply_persona(base_summary, persona),
+        "summary": summary,
         "base_summary": base_summary,
         "persona": persona,
-        **persona_response_fields(persona, base_summary),
+        **persona_response_fields(
+            persona, base_summary, summary, fallback_field="summary"),
     }
 
 
@@ -67,11 +72,6 @@ def _start_of_day(day) -> datetime:
 
 def _avg(values: list[float]) -> float:
     return sum(values) / len(values)
-
-
-def _has_any(text: str, words: list[str]) -> bool:
-    lowered = (text or "").lower()
-    return any(word in lowered for word in words)
 
 
 def _trend_weight(user_id: str, since) -> dict:
@@ -261,10 +261,6 @@ def _trend_inbody(user_id: str, since) -> dict:
 
 
 def _trend_meal(user_id: str, since) -> dict:
-    protein_words = ["단백질", "닭", "계란", "달걀", "고기", "생선", "두부", "콩", "요거트"]
-    veggie_words = ["채소", "야채", "샐러드", "나물", "브로콜리", "양배추", "상추", "김치"]
-    carb_words = ["밥", "현미", "고구마", "감자", "빵", "면", "파스타", "오트", "떡"]
-
     session = SessionLocal()
     try:
         logs = (
@@ -279,28 +275,16 @@ def _trend_meal(user_id: str, since) -> dict:
     if not logs:
         return _with_persona(user_id, {
             "direction": "flat",
-            "summary": "최근 식단 기록이 없어요. 사진 한 장부터 남기면 패턴을 잡아볼게요.",
+            "summary": "최근 식단 기록이 없어요. 오늘 먹은 걸 한 줄로 남기면 패턴을 잡아볼게요.",
             "flag": "insufficient_data",
         })
 
-    scores = []
-    category_hits = {"protein": 0, "veggie": 0, "carb": 0}
-    for log in logs:
-        text = log.photo_analysis or ""
-        has_protein = _has_any(text, protein_words)
-        has_veggie = _has_any(text, veggie_words)
-        has_carb = _has_any(text, carb_words)
-        score = 0
-        score += 1 if has_protein else 0
-        score += 1 if has_veggie else 0
-        score += 1 if has_carb else 0
-        category_hits["protein"] += 1 if has_protein else 0
-        category_hits["veggie"] += 1 if has_veggie else 0
-        category_hits["carb"] += 1 if has_carb else 0
-        scores.append(score)
+    classifications = [classify_meal_text(log.photo_analysis or "") for log in logs]
+    scores = [classification["meal_score"] for classification in classifications]
+    meal_pattern = summarize_meal_classifications(classifications)
 
     avg_score = _avg(scores)
-    missing_majority = min(category_hits.values()) < len(scores) / 2
+    missing_majority = bool(meal_pattern["common_missing_axes"])
     if len(scores) >= 4:
         mid = len(scores) // 2
         direction = _direction(_avg(scores[:mid]), _avg(scores[mid:]), eps=0.25)
@@ -309,10 +293,21 @@ def _trend_meal(user_id: str, since) -> dict:
     if direction == "flat" and missing_majority:
         direction = "down"
 
+    axis_labels = {"protein": "단백질", "carb": "탄수화물", "vegetable": "채소"}
+    missing_labels = [
+        axis_labels.get(axis, axis)
+        for axis in meal_pattern["common_missing_axes"]
+    ]
+    missing_text = "·".join(missing_labels) if missing_labels else "단백질·채소·탄수"
     summary = {
         "up": "최근 식단 기록은 균형이 좋아지는 흐름이에요. 단백질·채소·탄수 축을 계속 챙겨봐요.",
-        "down": "최근 식단은 균형 축이 자주 비어요. 다음 끼니에서 단백질이나 채소를 먼저 보완해봐요.",
+        "down": f"최근 식단은 {missing_text} 축이 자주 비어요. 다음 끼니에서 이 축부터 보완해봐요.",
         "flat": "식단은 대체로 비슷한 패턴이에요. 부족한 축 하나만 정해서 보완하면 좋아요.",
     }[direction]
     flag = "low_meal_logging" if len(logs) < 3 else "needs_balance" if direction == "down" else None
-    return _with_persona(user_id, {"direction": direction, "summary": summary, "flag": flag})
+    return _with_persona(user_id, {
+        "direction": direction,
+        "summary": summary,
+        "flag": flag,
+        "meal_pattern": meal_pattern,
+    })

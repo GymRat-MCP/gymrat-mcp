@@ -9,6 +9,12 @@ from types import SimpleNamespace
 from db.session import SessionLocal
 from db.models import ExerciseLibrary, WorkoutLog, User, Program
 from tools.analysis import _trend_volume
+from tools.persona import (
+    DEFAULT_PERSONA,
+    apply_persona,
+    normalize_persona,
+    persona_response_fields,
+)
 from tools.profile import normalize_goal, normalize_experience
 from tools.workout_parser import normalize_exercise
 from tools.exercise_map import (
@@ -142,12 +148,20 @@ def generate_routine(user_id: str, focus: str | None = None,
     exercises = _build_exercises(targets, history, profile, session_minutes,
                                  trend, recent_parts, deload, volume_boost)
     balance = _weekly_balance(history)                # 주간 부위별 세트량(#15-2)
-    rationale = _rationale(profile, split_label, exercises, trend, deload, balance)
+    base_rationale = _rationale(
+        profile, split_label, exercises, trend, deload, balance)
+    persona = normalize_persona(getattr(profile, "persona", None) or DEFAULT_PERSONA)
+    rationale = apply_persona(base_rationale, persona)
 
     return {"split": split_label, "exercises": exercises, "rationale": rationale,
+            "base_rationale": base_rationale,
+            "persona": persona,
             "week": week, "deload": deload,
             "weekly_balance": balance,
-            "pattern_mix": _pattern_mix(exercises)}   # 하루 패턴 분포(#15-3)
+            "pattern_mix": _pattern_mix(exercises),
+            **persona_response_fields(
+                persona, base_rationale, rationale,
+                fallback_field="rationale")}   # 하루 패턴 분포(#15-3)
 
 
 def _volume_trend(user_id: str) -> dict:
