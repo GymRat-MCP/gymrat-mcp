@@ -132,11 +132,15 @@ def generate_routine(user_id: str, focus: str | None = None,
     trend = _volume_trend(user_id)          # 분석 결과를 처방에 먹인다(#14)
     deload = _is_deload(trend) or program_deload   # 추세 or N주차 → 회복 주간
 
+    # 메소사이클 볼륨 램프(Phase D): 디로드 직전 축적 주간에 세트 +1(피크).
+    every = program.deload_every or 4
+    volume_boost = 1 if (not deload and week % every == every - 1) else 0
+
     days = program.split_type or available_days
     split_label, targets = _decide_split(days, focus, history)
     recent_parts = _recently_trained_parts(history)   # 48h 내 자극 부위 후순위(#15-2)
     exercises = _build_exercises(targets, history, profile, session_minutes,
-                                 trend, recent_parts, deload)
+                                 trend, recent_parts, deload, volume_boost)
     balance = _weekly_balance(history)                # 주간 부위별 세트량(#15-2)
     rationale = _rationale(profile, split_label, exercises, trend, deload, balance)
 
@@ -219,6 +223,35 @@ def _weekly_balance(history, within_days: int = 7) -> dict[str, int]:
             if p and s:
                 bal[p] = bal.get(p, 0) + s
     return bal
+
+
+def _stalled_exercises(history, window: int = 3) -> set[str]:
+    """최근 window회 연속 같은 무게로 정체된 종목(정규 한글명) 집합(Phase D).
+
+    로그는 date desc라 종목별 최근 무게를 앞에서부터 모은다. 최근 window회가
+    모두 같은 무게면 진전이 멈춘 것 → 처방에서 백오프로 러닝 스타트를 준다.
+    """
+    series: dict[str, list[float]] = {}
+    for log in history:                 # 최신 → 과거 순
+        for entry in (log.parsed or []):
+            ex, w = entry.get("exercise"), entry.get("weight")
+            if ex and w is not None:
+                series.setdefault(normalize_exercise(ex), []).append(w)
+    stalled = set()
+    for ko, weights in series.items():
+        recent = weights[:window]
+        if len(recent) >= window and len(set(recent)) == 1:
+            stalled.add(ko)
+    return stalled
+
+
+# 경력별 주당 부위 세트 랜드마크(볼륨 리포트 하한). 초보는 적게, 고급은 많이.
+_WEEKLY_TARGET_BY_EXP = {"초보": 8, "중급": 10, "고급": 14}
+
+
+def _weekly_target(experience: str | None) -> int:
+    """경력별 주당 부위 세트 하한(랜드마크). 미지정이면 중급 기준."""
+    return _WEEKLY_TARGET_BY_EXP.get(experience, _WEEKLY_SET_TARGET)
 
 
 def _pattern_mix(exercises: list[dict]) -> dict[str, int]:
@@ -362,7 +395,8 @@ def _build_exercises(targets: list[str], history, profile,
                      session_minutes: int | None,
                      trend: dict | None = None,
                      recent_parts: set[str] | None = None,
-                     deload: bool | None = None) -> list[dict]:
+                     deload: bool | None = None,
+                     volume_boost: int = 0) -> list[dict]:
     """타깃 부위별 종목 선택 + 목표별 sets/reps + 점진적 과부하 + 부상/회복 회피.
 
     - 볼륨 추세를 읽어 디로드/과부하 분기(#14): 하락·정체면 세트 -1 + 무게 디로드.
@@ -374,6 +408,7 @@ def _build_exercises(targets: list[str], history, profile,
     if deload is None:
         deload = _is_deload(trend or {})
     last_idx = _last_weight_index(history)
+    stalled = _stalled_exercises(history)   # 종목 단위 정체 → 백오프(Phase D)
     deprioritize, blocked = _injury_filters(getattr(profile, "injuries", None))
     deprioritize |= (recent_parts or set())   # 48h 내 자극 부위도 후순위
     # 개인화(Phase C): 싫어하는 종목은 부상처럼 차단, 보유 장비로 후보 필터
@@ -416,8 +451,9 @@ def _build_exercises(targets: list[str], history, profile,
             # 종목 역할별 처방 — 컴파운드/고립에 다른 sets·reps·휴식·강도(Phase A)
             role = exercise_role(ex["name"], ex["secondary"])
             sets, reps, rest_sec, intensity = _prescribe(
-                role, goal, experience, deload)
-            load, ex_reps = _progress(ex["name"], last_idx, part, reps, deload)
+                role, goal, experience, deload, volume_boost)
+            load, ex_reps = _progress(ex["name"], last_idx, part, reps,
+                                      deload, stalled)
             result.append({
                 "exercise": ex["name"],            # 영문(출력 시 한글화)
                 "target": part,
@@ -562,12 +598,14 @@ def _pick_complementary(candidates: list[dict], count: int,
 
 
 def _prescribe(role: str, goal: str | None, experience: str | None,
-               deload: bool = False) -> tuple[int, int, int, str]:
+               deload: bool = False,
+               volume_boost: int = 0) -> tuple[int, int, int, str]:
     """종목 역할별로 (세트, 목표반복, 휴식초, 강도문구)를 처방한다.
 
     핵심: 반복수는 **종목 역할**이 정한다 — 컴파운드는 저~중반복, 고립은 고반복.
     목표(goal)는 세트/강도 뉘앙스만 조절하지 반복수를 뒤집지 않는다.
     (구 버전의 "감량=고반복 15회"는 운동 상식 오류 — 체지방은 식단이 결정.)
+    volume_boost는 메소사이클 축적 주간(디로드 직전 피크)에 세트를 얹는다(Phase D).
     """
     if role == "compound":
         reps = 6 if goal == "증량" else 8        # 저~중반복(근력·근비대)
@@ -582,6 +620,8 @@ def _prescribe(role: str, goal: str | None, experience: str | None,
     if deload:
         sets = max(1, sets - 1)                    # 회복 주간: 세트↓
         rpe = "RPE 5~6 (가볍게, 회복 주간)"
+    else:
+        sets += max(0, volume_boost)               # 축적 주간: 세트↑(디로드 아닐 때만)
     return sets, reps, rest, rpe
 
 
@@ -607,7 +647,8 @@ def _last_weight_index(history) -> dict[str, dict]:
 
 def _progress(exercise_name: str, last_idx: dict[str, dict],
               part: str, base_reps: int,
-              deload: bool = False) -> tuple[float | None, int]:
+              deload: bool = False,
+              stalled: set[str] | None = None) -> tuple[float | None, int]:
     """직전 기록으로 다음 처방 (target_load, reps)를 정한다.
 
     - 브리지(#13): 처방 영문명 → 정규 한글로 변환 후 last_idx 조회. 큐레이션 28종만
@@ -615,6 +656,8 @@ def _progress(exercise_name: str, last_idx: dict[str, dict],
     - 더블 프로그레션(#14): 직전에 목표 렙(base_reps) 상단을 채웠으면 무게↑,
       못 채웠으면 무게 유지 + 렙 +1.
     - 디로드 주간이면 무게 -10%(회복), 렙은 목표로 리셋.
+    - 정체(Phase D): 최근 N회 같은 무게로 멈춘 종목은 -10% 백오프 후 렙 리셋 —
+      플래토를 깨는 러닝 스타트(디로드와 별개로 종목 단위 발화).
     """
     ko = lib_to_ko_canon(exercise_name)
     last = last_idx.get(ko) if ko is not None else None
@@ -624,6 +667,8 @@ def _progress(exercise_name: str, last_idx: dict[str, dict],
         return None, base_reps
     w = last["weight"]
     if deload:
+        return round(w * 0.9, 1), base_reps
+    if stalled and ko in stalled:          # 종목 단위 정체 → 백오프로 러닝 스타트
         return round(w * 0.9, 1), base_reps
     increment = 5.0 if part == "하체" else 2.5
     last_reps = last.get("reps")
@@ -659,7 +704,8 @@ def _rationale(profile, split_label: str, exercises: list[dict],
 
     msg = (f"오늘은 {split_label} — {goal_phrase} 방향으로 "
            f"{len(exercises)}종 구성했어요. {trend_phrase}.")
-    low = sorted(p for p, s in (balance or {}).items() if s < _WEEKLY_SET_TARGET)
+    target = _weekly_target(normalize_experience(getattr(profile, "experience", None)))
+    low = sorted(p for p, s in (balance or {}).items() if s < target)
     if low:
         msg += f" 이번 주 {'·'.join(low)} 볼륨이 아직 적어 다음 세션에서 보완하면 좋아요."
     if getattr(profile, "injuries", None):

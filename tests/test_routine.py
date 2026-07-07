@@ -226,6 +226,49 @@ def test_build_exercises_excludes_disliked(monkeypatch):
     assert "barbell full squat" in names
 
 
+# ── 진행/주기화 심화 (Phase D) ─────────────────────────────
+def test_stalled_exercises_detects_flat_weight():
+    # 최근 3회 같은 무게(80) → 정체. 오래된 상승분은 무시.
+    history = [
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0}]),
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0}]),
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0}]),
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 75.0}]),
+    ]
+    assert "벤치프레스" in routine._stalled_exercises(history)
+
+def test_stalled_exercises_not_flagged_when_progressing():
+    history = [
+        SimpleNamespace(parsed=[{"exercise": "스쿼트", "weight": 100.0}]),
+        SimpleNamespace(parsed=[{"exercise": "스쿼트", "weight": 95.0}]),
+        SimpleNamespace(parsed=[{"exercise": "스쿼트", "weight": 90.0}]),
+    ]
+    assert routine._stalled_exercises(history) == set()
+
+def test_progress_stall_backs_off():
+    # 정체 종목 → -10% 백오프(러닝 스타트), 렙 목표 리셋
+    idx = {"벤치프레스": {"weight": 80.0, "sets": 5, "reps": 8}}
+    out = routine._progress("barbell bench press", idx, "가슴", 8,
+                            stalled={"벤치프레스"})
+    assert out == (72.0, 8)
+
+def test_prescribe_volume_boost_adds_set():
+    base, _, _, _ = routine._prescribe("compound", "증량", None)
+    boosted, _, _, _ = routine._prescribe("compound", "증량", None, volume_boost=1)
+    assert boosted == base + 1
+
+def test_prescribe_volume_boost_ignored_on_deload():
+    # 디로드 주간엔 축적 부스트가 무시(회복 우선)
+    sets, _, _, _ = routine._prescribe("compound", "증량", None,
+                                       deload=True, volume_boost=1)
+    assert sets == 3
+
+def test_weekly_target_by_experience():
+    assert routine._weekly_target("초보") == 8
+    assert routine._weekly_target("고급") == 14
+    assert routine._weekly_target(None) == 10
+
+
 def test_injury_filters_keyword_match():
     parts, blocked = routine._injury_filters("어깨 회전근개")
     assert "어깨" in parts
