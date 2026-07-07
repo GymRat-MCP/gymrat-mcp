@@ -15,7 +15,7 @@ class User(Base):
     goal            = Column(String, nullable=True)       # "증량" | "감량" | "유지"
     experience      = Column(String, nullable=True)       # "초보" | "중급" | "고급"
     injuries        = Column(Text, nullable=True)         # 자유 텍스트
-    persona         = Column(String, default="코치")      # "천사" | "악마" | "코치" | "현실파이터"
+    persona         = Column(String, default="천사")      # "천사" | "악마" | "코치" | "현실파이터"
     summary_context = Column(Text, nullable=True)         # 최근 대화 요약 (호스트 LLM 참조용)
     created_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc),
