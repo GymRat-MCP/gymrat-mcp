@@ -118,3 +118,35 @@ def movement_pattern(name: str | None) -> str:
         if any(k in low for k in keys):
             return pattern
     return "기타"
+
+
+# ── 종목 역할: 컴파운드 vs 고립 (Phase A — 역할별 처방) ──
+# 다관절(컴파운드)은 저~중반복·긴 휴식, 단관절(고립)은 중~고반복·짧은 휴식으로
+# 처방을 분기한다. "스쿼트도 4×8, 레터럴 레이즈도 4×8"처럼 전 종목 동일 처방을 막음.
+# 단관절 신호가 우선(leg extension·rear delt row처럼 'row/press'가 섞여도 고립).
+_ISOLATION_KEYS = (
+    "curl", "extension", "raise", "fly", "flye", "pushdown", "kickback",
+    "pullover", "shrug", "crossover", "lateral", "rear delt", "pec deck",
+    "leg curl", "leg extension", "calf", "concentration",
+)
+_COMPOUND_KEYS = (
+    "squat", "deadlift", "bench press", "press", "row", "pull-up", "pullup",
+    "pull up", "chin-up", "chinup", "chin up", "pulldown", "pull-down",
+    "lunge", "dip", "thruster", "clean", "snatch", "hip thrust",
+    "glute bridge", "leg press", "good morning", "step-up", "step up",
+    "push-up", "push up",
+)
+
+
+def exercise_role(name: str | None, secondary: list | None = None) -> str:
+    """종목을 'compound'|'isolation'으로 분류한다.
+
+    단관절 키워드가 있으면 고립(우선), 다관절 키워드면 컴파운드,
+    둘 다 없으면 보조근 수(secondary≥2 → 컴파운드)로 폴백.
+    """
+    low = (name or "").lower()
+    if any(k in low for k in _ISOLATION_KEYS):
+        return "isolation"
+    if any(k in low for k in _COMPOUND_KEYS):
+        return "compound"
+    return "compound" if len(secondary or []) >= 2 else "isolation"

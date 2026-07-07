@@ -54,13 +54,13 @@ def test_double_progression_adds_rep_when_below_target(monkeypatch):
                      "equipment": "바벨", "secondary": []}]}
     monkeypatch.setattr(routine, "_query_exercises", lambda part, exp: fake.get(part, []))
     profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
-    # 직전 6렙 < 목표 8 → 무게 유지, 렙 +1
+    # 직전 5렙 < 목표 6(증량 컴파운드) → 무게 유지, 렙 +1
     history = [SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0,
-                                        "sets": 4, "reps": 6}])]
+                                        "sets": 4, "reps": 5}])]
     out = routine._build_exercises(["가슴"], history, profile, None,
                                    {"direction": "up"})
     assert out[0]["target_load"] == 80.0
-    assert out[0]["reps"] == 7
+    assert out[0]["reps"] == 6
 
 
 # ── 맨몸 볼륨 프록시 ───────────────────────────────────────

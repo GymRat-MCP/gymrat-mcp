@@ -11,7 +11,8 @@ from tools.analysis import _trend_volume
 from tools.profile import normalize_goal, normalize_experience
 from tools.workout_parser import normalize_exercise
 from tools.exercise_map import (
-    lib_to_ko_canon, log_name_to_part, movement_pattern, KO_CANON_TO_LIB,
+    lib_to_ko_canon, log_name_to_part, movement_pattern, exercise_role,
+    KO_CANON_TO_LIB,
 )
 
 _WEEKLY_SET_TARGET = 10   # 부위별 주당 최소 세트 랜드마크(하한, #15-2)
@@ -305,11 +306,8 @@ def _build_exercises(targets: list[str], history, profile,
     """
     experience = normalize_experience(getattr(profile, "experience", None))
     goal = normalize_goal(getattr(profile, "goal", None))
-    sets, reps = _sets_reps(goal, experience)
     if deload is None:
         deload = _is_deload(trend or {})
-    if deload:
-        sets = max(1, sets - 1)          # 회복 주간: 세트 한 단계 낮춤
     last_idx = _last_weight_index(history)
     deprioritize, blocked = _injury_filters(getattr(profile, "injuries", None))
     deprioritize |= (recent_parts or set())   # 48h 내 자극 부위도 후순위
@@ -345,13 +343,20 @@ def _build_exercises(targets: list[str], history, profile,
         for ex in _rotated_pick(candidates, _slots(part), offset):
             if len(result) >= total_cap:
                 return result
+            # 종목 역할별 처방 — 컴파운드/고립에 다른 sets·reps·휴식·강도(Phase A)
+            role = exercise_role(ex["name"], ex["secondary"])
+            sets, reps, rest_sec, intensity = _prescribe(
+                role, goal, experience, deload)
             load, ex_reps = _progress(ex["name"], last_idx, part, reps, deload)
             result.append({
                 "exercise": ex["name"],            # 영문(출력 시 한글화)
                 "target": part,
+                "role": role,                      # compound|isolation
                 "pattern": movement_pattern(ex["name"]),   # 밀기/당기기/... (#15-3)
                 "sets": sets,
                 "reps": ex_reps,                   # 더블 프로그레션 시 렙 +1 될 수 있음
+                "rest_sec": rest_sec,              # 세트 간 휴식(Phase A)
+                "intensity": intensity,            # 목표 강도(RPE, Phase A)
                 "target_load": load,
                 "form_cues": ex["form_cues"] or [],
             })
@@ -447,17 +452,28 @@ def _rotated_pick(candidates: list[dict], count: int, offset: int) -> list[dict]
     return picks + rot
 
 
-def _sets_reps(goal: str | None, experience: str | None) -> tuple[int, int]:
-    """목표별 세트×반복 처방. 초보는 세트 수를 한 단계 낮춘다."""
-    table = {
-        "증량": (4, 8),     # 근비대·근력
-        "감량": (3, 15),    # 고반복 대사
-        "유지": (3, 12),
-    }
-    sets, reps = table.get(goal, (3, 12))
+def _prescribe(role: str, goal: str | None, experience: str | None,
+               deload: bool = False) -> tuple[int, int, int, str]:
+    """종목 역할별로 (세트, 목표반복, 휴식초, 강도문구)를 처방한다.
+
+    핵심: 반복수는 **종목 역할**이 정한다 — 컴파운드는 저~중반복, 고립은 고반복.
+    목표(goal)는 세트/강도 뉘앙스만 조절하지 반복수를 뒤집지 않는다.
+    (구 버전의 "감량=고반복 15회"는 운동 상식 오류 — 체지방은 식단이 결정.)
+    """
+    if role == "compound":
+        reps = 6 if goal == "증량" else 8        # 저~중반복(근력·근비대)
+        sets = 4 if goal == "증량" else 3
+        rest, rpe = 150, "RPE 7~8 (마지막 2~3회는 힘들게)"
+    else:                                          # isolation
+        reps = 12 if goal == "증량" else 15       # 중~고반복(펌프·대사)
+        sets = 3
+        rest, rpe = 75, "RPE 8~9 (마지막 1~2회 남기고)"
     if experience == "초보":
-        sets = max(2, sets - 1)
-    return sets, reps
+        sets = max(2, sets - 1)                    # 초보는 볼륨 한 단계 낮춤
+    if deload:
+        sets = max(1, sets - 1)                    # 회복 주간: 세트↓
+        rpe = "RPE 5~6 (가볍게, 회복 주간)"
+    return sets, reps, rest, rpe
 
 
 def _last_weight_index(history) -> dict[str, dict]:

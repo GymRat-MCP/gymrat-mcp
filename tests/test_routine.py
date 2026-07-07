@@ -45,15 +45,31 @@ def test_normalize_focus_variants():
     assert routine._normalize_focus("존재안함") is None
 
 
-# ── _sets_reps ─────────────────────────────────────────────
-def test_sets_reps_by_goal():
-    assert routine._sets_reps("증량", None) == (4, 8)
-    assert routine._sets_reps("감량", None) == (3, 15)
-    assert routine._sets_reps("유지", None) == (3, 12)
-    assert routine._sets_reps(None, None) == (3, 12)
+# ── _prescribe (역할별 sets/reps/휴식/강도, Phase A) ────────
+def test_prescribe_compound_low_reps():
+    # 컴파운드는 저~중반복 — 증량이라도 6회(고반복 아님)
+    sets, reps, rest, rpe = routine._prescribe("compound", "증량", None)
+    assert (sets, reps) == (4, 6)
+    assert rest >= 120                     # 컴파운드는 긴 휴식
 
-def test_sets_reps_beginner_lowers_sets():
-    assert routine._sets_reps("증량", "초보") == (3, 8)
+def test_prescribe_isolation_high_reps():
+    # 고립은 중~고반복
+    sets, reps, rest, rpe = routine._prescribe("isolation", "증량", None)
+    assert reps >= 12
+    assert rest <= 90                      # 고립은 짧은 휴식
+
+def test_prescribe_cut_is_not_high_rep_compound():
+    # 회귀: "감량이니까 고반복 15회" 오개념 제거 — 컴파운드는 감량에도 저~중반복
+    _, reps, _, _ = routine._prescribe("compound", "감량", None)
+    assert reps <= 8
+
+def test_prescribe_beginner_lowers_sets():
+    sets, _, _, _ = routine._prescribe("compound", "증량", "초보")
+    assert sets == 3                       # 4 → 3
+
+def test_prescribe_deload_lowers_sets_and_intensity():
+    sets, _, _, rpe = routine._prescribe("compound", "증량", None, deload=True)
+    assert sets == 3 and "회복" in rpe
 
 
 # ── _progress (점진적 과부하 + 더블 프로그레션) ────────────
@@ -112,8 +128,10 @@ def test_build_exercises_structure(monkeypatch):
     assert len(out) == 3
     first = out[0]
     assert first["exercise"] == "barbell bench press"
-    assert first["sets"] == 4 and first["reps"] == 8       # 증량
+    assert first["role"] == "compound"                      # 벤치=컴파운드
+    assert first["sets"] == 4 and first["reps"] == 6        # 증량 컴파운드
     assert first["target_load"] == 82.5                     # 과부하 반영
+    assert first["rest_sec"] >= 120 and first["intensity"]  # Phase A 필드
     assert first["form_cues"] == ["a"]
 
 def test_build_exercises_excludes_injury_movements(monkeypatch):
