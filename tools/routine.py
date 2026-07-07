@@ -11,7 +11,7 @@ from tools.analysis import _trend_volume
 from tools.profile import normalize_goal, normalize_experience
 from tools.workout_parser import normalize_exercise
 from tools.exercise_map import (
-    lib_to_ko_canon, log_name_to_part, movement_pattern,
+    lib_to_ko_canon, log_name_to_part, movement_pattern, KO_CANON_TO_LIB,
 )
 
 _WEEKLY_SET_TARGET = 10   # 부위별 주당 최소 세트 랜드마크(하한, #15-2)
@@ -21,6 +21,10 @@ _WEEKLY_SET_TARGET = 10   # 부위별 주당 최소 세트 랜드마크(하한, 
 # 부위 그룹 (ExerciseLibrary.target 한글 부위명 기준)
 _PUSH = ["가슴", "어깨", "삼두"]
 _PULL = ["등", "이두", "전완"]
+# 보조 부위 — 메인 부위와 함께 처방될 땐 1종만(종아리·코어가 하체 같은
+# 메인 볼륨을 밀어내지 않도록). 이 부위만 단독으로 요청되면 정상 개수로 처방.
+_ACCESSORY_PARTS = {"종아리", "전완", "코어"}
+
 _LEGS = ["하체", "종아리"]
 _UPPER = ["가슴", "등", "어깨", "삼두", "이두"]
 _LOWER = ["하체", "종아리", "코어"]
@@ -310,9 +314,11 @@ def _build_exercises(targets: list[str], history, profile,
     deprioritize, blocked = _injury_filters(getattr(profile, "injuries", None))
     deprioritize |= (recent_parts or set())   # 48h 내 자극 부위도 후순위
 
-    # 다친/최근 자극 부위는 뒤로 미룬다(완전 제외하면 빈 루틴 위험 → 순서만 낮춤)
-    ordered = ([t for t in targets if t not in deprioritize]
-               + [t for t in targets if t in deprioritize])
+    # 정렬 순서: 다친/최근 자극 부위는 뒤로, 보조 부위(종아리·코어)도 메인 뒤로.
+    # (완전 제외하면 빈 루틴 위험 → 순서·개수만 낮춤). sorted는 안정 정렬이라
+    # 같은 키 안에선 원래 target 순서를 보존한다.
+    ordered = sorted(targets,
+                     key=lambda t: (t in deprioritize, t in _ACCESSORY_PARTS))
 
     # 세션 길이 → 총 종목 수(대략 12분/종목), 미지정 시 6종
     if session_minutes:
@@ -321,12 +327,22 @@ def _build_exercises(targets: list[str], history, profile,
         total_cap = 6
     per_target = 2 if len(targets) <= 3 else 1
 
+    # 보조 부위는 메인과 함께 나올 때 1종만(종아리 2종+하체 2종처럼 보조가
+    # 메인을 밀어내는 것 방지). 보조 부위만 단독 요청되면 정상 개수로 처방.
+    has_primary = any(t not in _ACCESSORY_PARTS for t in targets)
+
+    def _slots(part: str) -> int:
+        if has_primary and part in _ACCESSORY_PARTS:
+            return 1
+        return per_target
+
+    offset = len(history)   # 기록이 쌓일수록 보조 종목이 순환(세션 간 다양성)
     result: list[dict] = []
     for part in ordered:
         # 부상 악화 동작(오버헤드 프레스 등)은 종목 후보에서 제외
         candidates = [ex for ex in _query_exercises(part, experience)
                       if not _name_blocked(ex["name"], blocked)]
-        for ex in candidates[:per_target]:
+        for ex in _rotated_pick(candidates, _slots(part), offset):
             if len(result) >= total_cap:
                 return result
             load, ex_reps = _progress(ex["name"], last_idx, part, reps, deload)
@@ -364,10 +380,16 @@ def _query_exercises(part: str, experience: str | None) -> list[dict]:
     # 정렬 우선순위:
     # 1) 비(非)기술 동작 우선 — 올림픽 리프트(클린·스내치·저크)는 기술 난도가 높고
     #    데이터 태깅도 부정확(예: clean and press가 '하체')해서 일반 루틴 선두로 부적절 → 뒤로
-    # 2) 정석 장비(바벨>덤벨>…) 우선
-    # 3) 같은 조건이면 다관절(보조근 많음) 우선 → 컴파운드가 앞으로
+    # 2) 큐레이션된 주류 종목 우선 — 사람들이 실제 쓰는 대표 28종(exercise_map)을
+    #    앞으로. 데이터셋엔 "barbell full squat (back pov)"처럼 near-중복 변형이
+    #    많아 알파벳 tiebreak만으론 비주류 변형이 상단에 뜨는 문제를 막는다.
+    # 3) 중복/비주류 변형 태그((back pov)·(female)·v.2 등)는 후순위
+    # 4) 정석 장비(바벨>덤벨>…) 우선
+    # 5) 같은 조건이면 다관절(보조근 많음) 우선 → 컴파운드가 앞으로
     items.sort(key=lambda it: (
         _is_technical_lift(it["name"]),
+        _is_preferred(it["name"]),
+        _is_junk_variant(it["name"]),
         _EQUIP_PRIORITY.get(it["equipment"], 9),
         -len(it["secondary"]),
         it["name"],
@@ -382,6 +404,47 @@ _TECHNICAL_LIFTS = ("clean", "snatch", "jerk", "thruster", "muscle-up", "muscle 
 def _is_technical_lift(name: str) -> int:
     low = name.lower()
     return 1 if any(p in low for p in _TECHNICAL_LIFTS) else 0
+
+
+# 큐레이션된 주류 종목명(사용자가 실제 로그하는 대표 28종) → 선택 시 최우선.
+_PREFERRED_NAMES = {v.lower() for v in KO_CANON_TO_LIB.values()}
+
+# 데이터셋에 흔한 near-중복/비주류 변형 태그 — 상단 노출 방지용 후순위 마커.
+_JUNK_MARKERS = ("pov", "female", "male", "(1)", "(2)", "(3)",
+                 "v. 2", "v.2", "version", "wrong")
+
+
+def _is_preferred(name: str) -> int:
+    """큐레이션된 주류 종목이면 0(우선), 아니면 1."""
+    return 0 if name.lower() in _PREFERRED_NAMES else 1
+
+
+def _is_junk_variant(name: str) -> int:
+    """near-중복/비주류 변형 태그가 붙은 이름이면 1(후순위), 아니면 0."""
+    low = name.lower()
+    return 1 if any(m in low for m in _JUNK_MARKERS) else 0
+
+
+# 로테이션은 상위 후보 안에서만 — 데이터셋 꼬리(비주류 변형 수백 개)까지 순환하면
+# 세션이 지날수록 이상한 종목이 튀어나온다. 정렬 상단 주류 종목 안에서만 돌린다.
+_ROTATION_WINDOW = 6
+
+
+def _rotated_pick(candidates: list[dict], count: int, offset: int) -> list[dict]:
+    """부위별 종목을 count개 고른다 — 대표 컴파운드(0순위)는 고정, 나머지 슬롯은
+    상위 후보(주류 종목) 안에서 offset부터 순환 선택해 세션마다 보조 종목이
+    바뀌도록(매번 같은 운동 방지, 단 비주류 꼬리로는 빠지지 않게).
+    """
+    if count <= 0 or not candidates:
+        return []
+    picks = [candidates[0]]           # 대표 컴파운드는 매 세션 고정(스쿼트 등)
+    pool = candidates[1:_ROTATION_WINDOW]   # 상위 주류 후보로 로테이션 범위 제한
+    remaining = count - 1
+    if remaining <= 0 or not pool:
+        return picks[:count]
+    rot = [pool[(offset + i) % len(pool)]
+           for i in range(min(remaining, len(pool)))]
+    return picks + rot
 
 
 def _sets_reps(goal: str | None, experience: str | None) -> tuple[int, int]:
