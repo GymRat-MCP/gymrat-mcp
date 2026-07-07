@@ -132,8 +132,8 @@ def movement_pattern(name: str | None) -> str:
 # 단관절 신호가 우선(leg extension·rear delt row처럼 'row/press'가 섞여도 고립).
 _ISOLATION_KEYS = (
     "curl", "extension", "raise", "fly", "flye", "pushdown", "kickback",
-    "pullover", "shrug", "crossover", "lateral", "rear delt", "pec deck",
-    "leg curl", "leg extension", "calf", "concentration",
+    "pullover", "shrug", "crossover", "lateral raise", "rear delt",
+    "pec deck", "leg curl", "leg extension", "calf", "concentration",
 )
 _COMPOUND_KEYS = (
     "squat", "deadlift", "bench press", "press", "row", "pull-up", "pullup",

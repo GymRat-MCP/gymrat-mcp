@@ -78,7 +78,7 @@ def test_recent_part_deprioritized_in_build(monkeypatch):
         "가슴": [{"name": "barbell bench press", "form_cues": [], "equipment": "바벨", "secondary": []}],
         "등": [{"name": "barbell bent over row", "form_cues": [], "equipment": "바벨", "secondary": []}],
     }
-    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp: fake.get(part, []))
+    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp, a=None: fake.get(part, []))
     profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
     out = routine._build_exercises(["가슴", "등"], [], profile, None,
                                    trend={"direction": "up"},

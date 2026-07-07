@@ -18,7 +18,7 @@ def test_is_deload_branches():
 def test_deload_lowers_sets_and_weight(monkeypatch):
     fake = {"가슴": [{"name": "barbell bench press", "form_cues": [],
                      "equipment": "바벨", "secondary": []}]}
-    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp: fake.get(part, []))
+    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp, a=None: fake.get(part, []))
     profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
     history = [SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0,
                                         "sets": 5, "reps": 8}])]
@@ -32,7 +32,7 @@ def test_deload_lowers_sets_and_weight(monkeypatch):
 def test_up_trend_keeps_overload(monkeypatch):
     fake = {"가슴": [{"name": "barbell bench press", "form_cues": [],
                      "equipment": "바벨", "secondary": []}]}
-    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp: fake.get(part, []))
+    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp, a=None: fake.get(part, []))
     profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
     history = [SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0,
                                         "sets": 5, "reps": 8}])]
@@ -52,7 +52,7 @@ def test_deload_rationale_mentions_recovery():
 def test_double_progression_adds_rep_when_below_target(monkeypatch):
     fake = {"가슴": [{"name": "barbell bench press", "form_cues": [],
                      "equipment": "바벨", "secondary": []}]}
-    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp: fake.get(part, []))
+    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp, a=None: fake.get(part, []))
     profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
     # 직전 5렙 < 목표 6(증량 컴파운드) → 무게 유지, 렙 +1
     history = [SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0,

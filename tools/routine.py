@@ -3,6 +3,7 @@
 결정론적 룰 기반(LLM 호출 X)이라 안정성 점수에 유리.
 form_cues는 exercise_library에서 가져옴(영문 단계) → 출력 시 호스트 LLM이 한글화.
 """
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from db.session import SessionLocal
@@ -293,6 +294,70 @@ def _name_blocked(name: str, patterns: list[str]) -> bool:
     return any(p in low for p in patterns)
 
 
+# ── 개인화: 보유 장비 필터 · 선호 제외 (Phase C) ────────────
+# 장비 별칭 → 라이브러리 equipment 정규값(DB target과 일치).
+_EQUIP_ALIASES = {
+    "바벨": "바벨", "barbell": "바벨",
+    "덤벨": "덤벨", "dumbbell": "덤벨",
+    "머신": "머신", "machine": "머신",
+    "케이블": "케이블", "cable": "케이블",
+    "케틀벨": "케틀벨", "kettlebell": "케틀벨",
+    "맨몸": "맨몸", "bodyweight": "맨몸", "body weight": "맨몸", "bw": "맨몸",
+    "밴드": "밴드", "band": "밴드",
+    "볼": "볼", "ball": "볼",
+}
+# 이 값이 들어오면 "장비 다 있음" → 필터 안 함.
+_NO_EQUIP_FILTER = {"풀짐", "헬스장", "짐", "gym", "full", "전체", "다", "all", "없음"}
+
+
+def _allowed_equipment(available: str | list | None) -> set[str] | None:
+    """available_equipment(자유 텍스트/리스트)를 허용 장비 집합으로 파싱한다.
+
+    None/미인식/"풀짐"이면 None(필터 안 함). 뭐라도 골랐으면 빈 루틴 방지를
+    위해 맨몸을 항상 허용에 포함.
+    """
+    if not available:
+        return None
+    tokens = (re.split(r"[,/·\s]+", available) if isinstance(available, str)
+              else list(available))
+    allowed: set[str] = set()
+    for t in tokens:
+        raw = str(t).strip()
+        low = raw.lower()
+        if not raw:
+            continue
+        if raw in _NO_EQUIP_FILTER or low in _NO_EQUIP_FILTER:
+            return None
+        canon = _EQUIP_ALIASES.get(raw) or _EQUIP_ALIASES.get(low)
+        if canon:
+            allowed.add(canon)
+    if allowed:
+        allowed.add("맨몸")        # 맨몸은 언제나 가능(빈 루틴 방지)
+    return allowed or None
+
+
+def _disliked_patterns(disliked: str | list | None) -> list[str]:
+    """disliked_exercises → 차단할 영문 종목명 패턴(부상 blocked와 같은 경로).
+
+    한글 정규명은 KO_CANON_TO_LIB로 영문 대표명까지 확장해 라이브러리 종목과
+    매칭되게 한다(예: '레그익스텐션' → 'lever leg extension').
+    """
+    if not disliked:
+        return []
+    items = (re.split(r"[,/·]+", disliked) if isinstance(disliked, str)
+             else list(disliked))
+    pats: list[str] = []
+    for d in items:
+        d = str(d).strip()
+        if not d:
+            continue
+        pats.append(d.lower())
+        lib = KO_CANON_TO_LIB.get(normalize_exercise(d))
+        if lib:
+            pats.append(lib.lower())
+    return pats
+
+
 def _build_exercises(targets: list[str], history, profile,
                      session_minutes: int | None,
                      trend: dict | None = None,
@@ -311,6 +376,11 @@ def _build_exercises(targets: list[str], history, profile,
     last_idx = _last_weight_index(history)
     deprioritize, blocked = _injury_filters(getattr(profile, "injuries", None))
     deprioritize |= (recent_parts or set())   # 48h 내 자극 부위도 후순위
+    # 개인화(Phase C): 싫어하는 종목은 부상처럼 차단, 보유 장비로 후보 필터
+    blocked = blocked + _disliked_patterns(
+        getattr(profile, "disliked_exercises", None))
+    allowed_equip = _allowed_equipment(
+        getattr(profile, "available_equipment", None))
 
     # 정렬 순서: 다친/최근 자극 부위는 뒤로, 보조 부위(종아리·코어)도 메인 뒤로.
     # (완전 제외하면 빈 루틴 위험 → 순서·개수만 낮춤). sorted는 안정 정렬이라
@@ -338,7 +408,7 @@ def _build_exercises(targets: list[str], history, profile,
     result: list[dict] = []
     for part in ordered:
         # 부상 악화 동작(오버헤드 프레스 등)은 종목 후보에서 제외
-        candidates = [ex for ex in _query_exercises(part, experience)
+        candidates = [ex for ex in _query_exercises(part, experience, allowed_equip)
                       if not _name_blocked(ex["name"], blocked)]
         for ex in _pick_complementary(candidates, _slots(part), offset):
             if len(result) >= total_cap:
@@ -363,8 +433,9 @@ def _build_exercises(targets: list[str], history, profile,
     return result
 
 
-def _query_exercises(part: str, experience: str | None) -> list[dict]:
-    """부위별 종목을 경력 필터 + 컴파운드 우선으로 정렬해 반환한다."""
+def _query_exercises(part: str, experience: str | None,
+                     allowed_equipment: set[str] | None = None) -> list[dict]:
+    """부위별 종목을 경력·장비 필터 + 컴파운드 우선으로 정렬해 반환한다."""
     session = SessionLocal()
     try:
         rows = (session.query(ExerciseLibrary)
@@ -381,6 +452,12 @@ def _query_exercises(part: str, experience: str | None) -> list[dict]:
         } for r in rows]
     finally:
         session.close()
+
+    # 보유 장비 필터(Phase C): 가진 장비 종목만. 이 부위가 통째로 비면
+    # 맨몸으로, 그래도 없으면 전체로 폴백(빈 루틴 금지).
+    if allowed_equipment:
+        filtered = [it for it in items if it["equipment"] in allowed_equipment]
+        items = filtered or [it for it in items if it["equipment"] == "맨몸"] or items
 
     # 정렬 우선순위:
     # 1) 비(非)기술 동작 우선 — 올림픽 리프트(클린·스내치·저크)는 기술 난도가 높고
