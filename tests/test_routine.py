@@ -155,6 +155,21 @@ def test_build_exercises_excludes_injury_movements(monkeypatch):
     assert "dumbbell lateral raise" in names   # 안전 종목은 유지
     assert names  # 빈 루틴 아님
 
+def test_pick_complementary_prefers_new_pattern(monkeypatch):
+    # 등: 첫 종목이 수평 당기기(로우)면 둘째는 수직 당기기(랫풀다운) 우선
+    back = [
+        {"name": "barbell bent over row", "form_cues": [], "equipment": "바벨", "secondary": ["이두"]},
+        {"name": "cable seated row", "form_cues": [], "equipment": "케이블", "secondary": ["이두"]},
+        {"name": "cable lat pulldown", "form_cues": [], "equipment": "케이블", "secondary": ["이두"]},
+    ]
+    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp: back)
+    profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
+    out = routine._build_exercises(["등"], [], profile, None)
+    keys = {routine._diversity_key(e["exercise"]) for e in out}
+    # 로우 2종이 아니라 수평+수직 당기기 조합
+    assert "수평당기기" in keys and "수직당기기" in keys
+
+
 def test_technical_lift_deprioritized():
     # 올림픽/파워 리프트는 일반 루틴 선두에서 밀려야 함
     assert routine._is_technical_lift("barbell clean and press") == 1

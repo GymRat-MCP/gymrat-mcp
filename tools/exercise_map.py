@@ -95,6 +95,9 @@ def log_name_to_part(logged_name: str | None) -> str | None:
 # 라이브러리 영문 종목명 부분일치로 밀기/당기기/힌지/스쿼트/코어를 부여한다.
 # "근육 수프"(예: 가슴 6종) 방지를 위해 처방 시 패턴 다양성을 확인하는 용도.
 _PATTERN_RULES = [
+    # 종아리(카프레이즈)를 최우선 매칭 — 예전엔 "raise"가 코어 규칙에 걸려
+    # calf raise가 "코어"로 오태깅됐다.
+    ("종아리", ("calf",)),
     ("스쿼트", ("squat", "leg press", "lunge", "leg extension", "step-up", "step up")),
     ("힌지",   ("deadlift", "hip thrust", "glute bridge", "good morning",
                "romanian", "leg curl", "back extension", "hyperextension")),
@@ -104,8 +107,11 @@ _PATTERN_RULES = [
                "military press", "push-up", "push up", "pushdown", "dip",
                "fly", "flye", "crossover", "extension", "lateral raise",
                "front raise", "press")),
-    ("코어",   ("plank", "crunch", "sit-up", "situp", "twist", "raise",
-               "rollout", "rollerout", "hollow", "woodchop")),
+    # 코어의 raise는 특정형(leg/knee raise·hanging)만 — 일반 "raise"로 두면
+    # calf/lateral raise까지 잘못 삼킨다.
+    ("코어",   ("plank", "crunch", "sit-up", "situp", "twist", "leg raise",
+               "knee raise", "hanging", "rollout", "rollerout", "hollow",
+               "woodchop")),
 ]
 
 

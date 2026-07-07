@@ -340,7 +340,7 @@ def _build_exercises(targets: list[str], history, profile,
         # 부상 악화 동작(오버헤드 프레스 등)은 종목 후보에서 제외
         candidates = [ex for ex in _query_exercises(part, experience)
                       if not _name_blocked(ex["name"], blocked)]
-        for ex in _rotated_pick(candidates, _slots(part), offset):
+        for ex in _pick_complementary(candidates, _slots(part), offset):
             if len(result) >= total_cap:
                 return result
             # 종목 역할별 처방 — 컴파운드/고립에 다른 sets·reps·휴식·강도(Phase A)
@@ -435,21 +435,53 @@ def _is_junk_variant(name: str) -> int:
 _ROTATION_WINDOW = 6
 
 
-def _rotated_pick(candidates: list[dict], count: int, offset: int) -> list[dict]:
-    """부위별 종목을 count개 고른다 — 대표 컴파운드(0순위)는 고정, 나머지 슬롯은
-    상위 후보(주류 종목) 안에서 offset부터 순환 선택해 세션마다 보조 종목이
-    바뀌도록(매번 같은 운동 방지, 단 비주류 꼬리로는 빠지지 않게).
+def _diversity_key(name: str) -> str:
+    """종목 선택 다양성용 세분 패턴 키(Phase B).
+
+    movement_pattern은 로우/랫풀다운을 둘 다 '당기기'로, 벤치/플라이를 둘 다
+    '밀기'로 뭉갠다. 하루 안에서 상보적 종목(수직+수평 당기기, 프레스+플라이)을
+    고르려면 더 잘게 나눠야 한다.
+    """
+    low = name.lower()
+    if any(k in low for k in ("pulldown", "pull-down", "pull-up", "pullup",
+                              "pull up", "chin-up", "chinup", "chin up")):
+        return "수직당기기"
+    if "row" in low:
+        return "수평당기기"
+    if any(k in low for k in ("overhead press", "shoulder press",
+                              "military press")):
+        return "수직밀기"
+    if any(k in low for k in ("bench press", "chest press", "push-up",
+                              "push up")):
+        return "수평밀기"
+    if any(k in low for k in ("fly", "flye", "crossover", "pec deck")):
+        return "플라이"
+    return movement_pattern(name)
+
+
+def _pick_complementary(candidates: list[dict], count: int,
+                        offset: int) -> list[dict]:
+    """부위별 종목을 count개 고른다 — 대표 컴파운드(0순위)는 고정하고, 나머지
+    슬롯은 (1)아직 안 쓴 움직임 패턴을 우선하고 (2)상위 주류 후보 안에서
+    offset부터 순환해 채운다. → 로우 2종·프레스 2종 같은 중복 대신 상보적 조합
+    (수직+수평 당기기 등)을, 그러면서 세션마다 보조 종목이 바뀌도록.
     """
     if count <= 0 or not candidates:
         return []
-    picks = [candidates[0]]           # 대표 컴파운드는 매 세션 고정(스쿼트 등)
-    pool = candidates[1:_ROTATION_WINDOW]   # 상위 주류 후보로 로테이션 범위 제한
-    remaining = count - 1
-    if remaining <= 0 or not pool:
-        return picks[:count]
-    rot = [pool[(offset + i) % len(pool)]
-           for i in range(min(remaining, len(pool)))]
-    return picks + rot
+    picks = [candidates[0]]                   # 대표 컴파운드 고정(스쿼트 등)
+    used = {_diversity_key(candidates[0]["name"])}
+    pool = list(candidates[1:_ROTATION_WINDOW])   # 상위 주류 후보로 범위 제한
+    rot = offset
+    while len(picks) < count and pool:
+        # 새 패턴 후보 우선 — 없으면 남은 풀에서 로테이션
+        fresh = [c for c in pool if _diversity_key(c["name"]) not in used]
+        src = fresh or pool
+        pick = src[rot % len(src)]
+        rot += 1
+        picks.append(pick)
+        used.add(_diversity_key(pick["name"]))
+        pool = [c for c in pool if c is not pick]
+    return picks
 
 
 def _prescribe(role: str, goal: str | None, experience: str | None,

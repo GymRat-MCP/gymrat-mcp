@@ -16,6 +16,9 @@ def test_movement_pattern_tags():
     assert movement_pattern("front plank with twist") == "코어"
     assert movement_pattern("cable pushdown") == "밀기"
     assert movement_pattern("something weird") == "기타"
+    # 회귀: 카프레이즈는 '코어'가 아니라 '종아리'(예전 "raise" 오태깅)
+    assert movement_pattern("barbell standing calf raise") == "종아리"
+    assert movement_pattern("dumbbell seated calf raise") == "종아리"
 
 
 def test_log_name_to_part():
