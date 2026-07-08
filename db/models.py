@@ -1,6 +1,6 @@
 from sqlalchemy import (
     create_engine, Column, String, Float, Integer,
-    Date, DateTime, Text, JSON
+    Date, DateTime, Text, JSON, Boolean, Index
 )
 from sqlalchemy.orm import declarative_base
 from datetime import datetime, timezone
@@ -57,6 +57,33 @@ class WorkoutLog(Base):
     raw_text    = Column(Text, nullable=True)             # 사용자 원문
     parsed      = Column(JSON, nullable=True)             # 파싱 결과 [{exercise, weight, sets, reps}]
     logged_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class ExerciseSet(Base):
+    """세트 단위 구조화 기록(P0). WorkoutLog(원문·세션 메타)는 유지하고,
+    log_workout 이 parsed 를 이 테이블로 전개(듀얼라이트)한다.
+
+    종목별 조회·e1RM·PR·부위별 볼륨·상대날짜 백필의 공통 기반.
+    parsed(JSON 블롭)로는 종목별 집계가 비효율이라 세트를 행으로 편다.
+    """
+    __tablename__ = "exercise_sets"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    user_id    = Column(String, nullable=False, index=True)
+    date       = Column(Date, nullable=False, index=True)     # 세트 수행 날짜
+    exercise   = Column(String, nullable=False, index=True)   # 정규화 한글명(normalize_exercise 결과)
+    set_no     = Column(Integer, nullable=True)               # 세션 내 세트 순번(1-base)
+    weight     = Column(Float, nullable=True)                 # kg, 맨몸=null
+    reps       = Column(Integer, nullable=True)
+    rir        = Column(Integer, nullable=True)               # Reps In Reserve(선택; 수집은 후속 페이즈)
+    is_warmup  = Column(Boolean, default=False)               # 통계 제외용
+    log_id     = Column(Integer, nullable=True, index=True)   # WorkoutLog.id 역참조(원문 연결)
+    logged_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # 종목별 시계열 조회 최적화용 복합 인덱스
+    __table_args__ = (
+        Index("ix_exercise_sets_user_exercise_date", "user_id", "exercise", "date"),
+    )
 
 
 class MealLog(Base):
