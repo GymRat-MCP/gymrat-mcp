@@ -13,6 +13,11 @@ services:
     build: .
     environment:
       DATABASE_URL: postgresql+psycopg://user:${POSTGRES_PASSWORD:-password}@db:5432/gymrat
+      # FastMCP 3.4.3+ 는 Host/Origin 검증(DNS 리바인딩 보호)이 기본 ON 이라
+      # Caddy 가 넘긴 Host(도메인)를 거부해 421 Misdirected Request 를 낸다.
+      # 이 엔드포인트는 TLS+Caddy 뒤의 공개 서버-투-서버(MCP) 라 해당 위협모델이
+      # 아니므로 보호를 끈다. (로컬 실행 MCP 를 노린 브라우저 공격 방어용 기능)
+      FASTMCP_HTTP_HOST_ORIGIN_PROTECTION: "false"
     depends_on:
       - db
     restart: unless-stopped
