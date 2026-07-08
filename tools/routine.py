@@ -3,6 +3,7 @@
 결정론적 룰 기반(LLM 호출 X)이라 안정성 점수에 유리.
 form_cues는 exercise_library에서 가져옴(영문 단계) → 출력 시 호스트 LLM이 한글화.
 """
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from db.session import SessionLocal
@@ -17,7 +18,8 @@ from tools.persona import (
 from tools.profile import normalize_goal, normalize_experience
 from tools.workout_parser import normalize_exercise
 from tools.exercise_map import (
-    lib_to_ko_canon, log_name_to_part, movement_pattern,
+    lib_to_ko_canon, log_name_to_part, movement_pattern, exercise_role,
+    KO_CANON_TO_LIB,
 )
 
 _WEEKLY_SET_TARGET = 10   # 부위별 주당 최소 세트 랜드마크(하한, #15-2)
@@ -27,6 +29,10 @@ _WEEKLY_SET_TARGET = 10   # 부위별 주당 최소 세트 랜드마크(하한, 
 # 부위 그룹 (ExerciseLibrary.target 한글 부위명 기준)
 _PUSH = ["가슴", "어깨", "삼두"]
 _PULL = ["등", "이두", "전완"]
+# 보조 부위 — 메인 부위와 함께 처방될 땐 1종만(종아리·코어가 하체 같은
+# 메인 볼륨을 밀어내지 않도록). 이 부위만 단독으로 요청되면 정상 개수로 처방.
+_ACCESSORY_PARTS = {"종아리", "전완", "코어"}
+
 _LEGS = ["하체", "종아리"]
 _UPPER = ["가슴", "등", "어깨", "삼두", "이두"]
 _LOWER = ["하체", "종아리", "코어"]
@@ -132,11 +138,15 @@ def generate_routine(user_id: str, focus: str | None = None,
     trend = _volume_trend(user_id)          # 분석 결과를 처방에 먹인다(#14)
     deload = _is_deload(trend) or program_deload   # 추세 or N주차 → 회복 주간
 
+    # 메소사이클 볼륨 램프(Phase D): 디로드 직전 축적 주간에 세트 +1(피크).
+    every = program.deload_every or 4
+    volume_boost = 1 if (not deload and week % every == every - 1) else 0
+
     days = program.split_type or available_days
     split_label, targets = _decide_split(days, focus, history)
     recent_parts = _recently_trained_parts(history)   # 48h 내 자극 부위 후순위(#15-2)
     exercises = _build_exercises(targets, history, profile, session_minutes,
-                                 trend, recent_parts, deload)
+                                 trend, recent_parts, deload, volume_boost)
     balance = _weekly_balance(history)                # 주간 부위별 세트량(#15-2)
     base_rationale = _rationale(
         profile, split_label, exercises, trend, deload, balance)
@@ -229,6 +239,35 @@ def _weekly_balance(history, within_days: int = 7) -> dict[str, int]:
     return bal
 
 
+def _stalled_exercises(history, window: int = 3) -> set[str]:
+    """최근 window회 연속 같은 무게로 정체된 종목(정규 한글명) 집합(Phase D).
+
+    로그는 date desc라 종목별 최근 무게를 앞에서부터 모은다. 최근 window회가
+    모두 같은 무게면 진전이 멈춘 것 → 처방에서 백오프로 러닝 스타트를 준다.
+    """
+    series: dict[str, list[float]] = {}
+    for log in history:                 # 최신 → 과거 순
+        for entry in (log.parsed or []):
+            ex, w = entry.get("exercise"), entry.get("weight")
+            if ex and w is not None:
+                series.setdefault(normalize_exercise(ex), []).append(w)
+    stalled = set()
+    for ko, weights in series.items():
+        recent = weights[:window]
+        if len(recent) >= window and len(set(recent)) == 1:
+            stalled.add(ko)
+    return stalled
+
+
+# 경력별 주당 부위 세트 랜드마크(볼륨 리포트 하한). 초보는 적게, 고급은 많이.
+_WEEKLY_TARGET_BY_EXP = {"초보": 8, "중급": 10, "고급": 14}
+
+
+def _weekly_target(experience: str | None) -> int:
+    """경력별 주당 부위 세트 하한(랜드마크). 미지정이면 중급 기준."""
+    return _WEEKLY_TARGET_BY_EXP.get(experience, _WEEKLY_SET_TARGET)
+
+
 def _pattern_mix(exercises: list[dict]) -> dict[str, int]:
     """오늘 처방의 움직임 패턴 분포(#15-3)."""
     mix: dict[str, int] = {}
@@ -302,11 +341,76 @@ def _name_blocked(name: str, patterns: list[str]) -> bool:
     return any(p in low for p in patterns)
 
 
+# ── 개인화: 보유 장비 필터 · 선호 제외 (Phase C) ────────────
+# 장비 별칭 → 라이브러리 equipment 정규값(DB target과 일치).
+_EQUIP_ALIASES = {
+    "바벨": "바벨", "barbell": "바벨",
+    "덤벨": "덤벨", "dumbbell": "덤벨",
+    "머신": "머신", "machine": "머신",
+    "케이블": "케이블", "cable": "케이블",
+    "케틀벨": "케틀벨", "kettlebell": "케틀벨",
+    "맨몸": "맨몸", "bodyweight": "맨몸", "body weight": "맨몸", "bw": "맨몸",
+    "밴드": "밴드", "band": "밴드",
+    "볼": "볼", "ball": "볼",
+}
+# 이 값이 들어오면 "장비 다 있음" → 필터 안 함.
+_NO_EQUIP_FILTER = {"풀짐", "헬스장", "짐", "gym", "full", "전체", "다", "all", "없음"}
+
+
+def _allowed_equipment(available: str | list | None) -> set[str] | None:
+    """available_equipment(자유 텍스트/리스트)를 허용 장비 집합으로 파싱한다.
+
+    None/미인식/"풀짐"이면 None(필터 안 함). 뭐라도 골랐으면 빈 루틴 방지를
+    위해 맨몸을 항상 허용에 포함.
+    """
+    if not available:
+        return None
+    tokens = (re.split(r"[,/·\s]+", available) if isinstance(available, str)
+              else list(available))
+    allowed: set[str] = set()
+    for t in tokens:
+        raw = str(t).strip()
+        low = raw.lower()
+        if not raw:
+            continue
+        if raw in _NO_EQUIP_FILTER or low in _NO_EQUIP_FILTER:
+            return None
+        canon = _EQUIP_ALIASES.get(raw) or _EQUIP_ALIASES.get(low)
+        if canon:
+            allowed.add(canon)
+    if allowed:
+        allowed.add("맨몸")        # 맨몸은 언제나 가능(빈 루틴 방지)
+    return allowed or None
+
+
+def _disliked_patterns(disliked: str | list | None) -> list[str]:
+    """disliked_exercises → 차단할 영문 종목명 패턴(부상 blocked와 같은 경로).
+
+    한글 정규명은 KO_CANON_TO_LIB로 영문 대표명까지 확장해 라이브러리 종목과
+    매칭되게 한다(예: '레그익스텐션' → 'lever leg extension').
+    """
+    if not disliked:
+        return []
+    items = (re.split(r"[,/·]+", disliked) if isinstance(disliked, str)
+             else list(disliked))
+    pats: list[str] = []
+    for d in items:
+        d = str(d).strip()
+        if not d:
+            continue
+        pats.append(d.lower())
+        lib = KO_CANON_TO_LIB.get(normalize_exercise(d))
+        if lib:
+            pats.append(lib.lower())
+    return pats
+
+
 def _build_exercises(targets: list[str], history, profile,
                      session_minutes: int | None,
                      trend: dict | None = None,
                      recent_parts: set[str] | None = None,
-                     deload: bool | None = None) -> list[dict]:
+                     deload: bool | None = None,
+                     volume_boost: int = 0) -> list[dict]:
     """타깃 부위별 종목 선택 + 목표별 sets/reps + 점진적 과부하 + 부상/회복 회피.
 
     - 볼륨 추세를 읽어 디로드/과부하 분기(#14): 하락·정체면 세트 -1 + 무게 디로드.
@@ -315,18 +419,23 @@ def _build_exercises(targets: list[str], history, profile,
     """
     experience = normalize_experience(getattr(profile, "experience", None))
     goal = normalize_goal(getattr(profile, "goal", None))
-    sets, reps = _sets_reps(goal, experience)
     if deload is None:
         deload = _is_deload(trend or {})
-    if deload:
-        sets = max(1, sets - 1)          # 회복 주간: 세트 한 단계 낮춤
     last_idx = _last_weight_index(history)
+    stalled = _stalled_exercises(history)   # 종목 단위 정체 → 백오프(Phase D)
     deprioritize, blocked = _injury_filters(getattr(profile, "injuries", None))
     deprioritize |= (recent_parts or set())   # 48h 내 자극 부위도 후순위
+    # 개인화(Phase C): 싫어하는 종목은 부상처럼 차단, 보유 장비로 후보 필터
+    blocked = blocked + _disliked_patterns(
+        getattr(profile, "disliked_exercises", None))
+    allowed_equip = _allowed_equipment(
+        getattr(profile, "available_equipment", None))
 
-    # 다친/최근 자극 부위는 뒤로 미룬다(완전 제외하면 빈 루틴 위험 → 순서만 낮춤)
-    ordered = ([t for t in targets if t not in deprioritize]
-               + [t for t in targets if t in deprioritize])
+    # 정렬 순서: 다친/최근 자극 부위는 뒤로, 보조 부위(종아리·코어)도 메인 뒤로.
+    # (완전 제외하면 빈 루틴 위험 → 순서·개수만 낮춤). sorted는 안정 정렬이라
+    # 같은 키 안에선 원래 target 순서를 보존한다.
+    ordered = sorted(targets,
+                     key=lambda t: (t in deprioritize, t in _ACCESSORY_PARTS))
 
     # 세션 길이 → 총 종목 수(대략 12분/종목), 미지정 시 6종
     if session_minutes:
@@ -335,29 +444,48 @@ def _build_exercises(targets: list[str], history, profile,
         total_cap = 6
     per_target = 2 if len(targets) <= 3 else 1
 
+    # 보조 부위는 메인과 함께 나올 때 1종만(종아리 2종+하체 2종처럼 보조가
+    # 메인을 밀어내는 것 방지). 보조 부위만 단독 요청되면 정상 개수로 처방.
+    has_primary = any(t not in _ACCESSORY_PARTS for t in targets)
+
+    def _slots(part: str) -> int:
+        if has_primary and part in _ACCESSORY_PARTS:
+            return 1
+        return per_target
+
+    offset = len(history)   # 기록이 쌓일수록 보조 종목이 순환(세션 간 다양성)
     result: list[dict] = []
     for part in ordered:
         # 부상 악화 동작(오버헤드 프레스 등)은 종목 후보에서 제외
-        candidates = [ex for ex in _query_exercises(part, experience)
+        candidates = [ex for ex in _query_exercises(part, experience, allowed_equip)
                       if not _name_blocked(ex["name"], blocked)]
-        for ex in candidates[:per_target]:
+        for ex in _pick_complementary(candidates, _slots(part), offset):
             if len(result) >= total_cap:
                 return result
-            load, ex_reps = _progress(ex["name"], last_idx, part, reps, deload)
+            # 종목 역할별 처방 — 컴파운드/고립에 다른 sets·reps·휴식·강도(Phase A)
+            role = exercise_role(ex["name"], ex["secondary"])
+            sets, reps, rest_sec, intensity = _prescribe(
+                role, goal, experience, deload, volume_boost)
+            load, ex_reps = _progress(ex["name"], last_idx, part, reps,
+                                      deload, stalled)
             result.append({
                 "exercise": ex["name"],            # 영문(출력 시 한글화)
                 "target": part,
+                "role": role,                      # compound|isolation
                 "pattern": movement_pattern(ex["name"]),   # 밀기/당기기/... (#15-3)
                 "sets": sets,
                 "reps": ex_reps,                   # 더블 프로그레션 시 렙 +1 될 수 있음
+                "rest_sec": rest_sec,              # 세트 간 휴식(Phase A)
+                "intensity": intensity,            # 목표 강도(RPE, Phase A)
                 "target_load": load,
                 "form_cues": ex["form_cues"] or [],
             })
     return result
 
 
-def _query_exercises(part: str, experience: str | None) -> list[dict]:
-    """부위별 종목을 경력 필터 + 컴파운드 우선으로 정렬해 반환한다."""
+def _query_exercises(part: str, experience: str | None,
+                     allowed_equipment: set[str] | None = None) -> list[dict]:
+    """부위별 종목을 경력·장비 필터 + 컴파운드 우선으로 정렬해 반환한다."""
     session = SessionLocal()
     try:
         rows = (session.query(ExerciseLibrary)
@@ -375,13 +503,25 @@ def _query_exercises(part: str, experience: str | None) -> list[dict]:
     finally:
         session.close()
 
+    # 보유 장비 필터(Phase C): 가진 장비 종목만. 이 부위가 통째로 비면
+    # 맨몸으로, 그래도 없으면 전체로 폴백(빈 루틴 금지).
+    if allowed_equipment:
+        filtered = [it for it in items if it["equipment"] in allowed_equipment]
+        items = filtered or [it for it in items if it["equipment"] == "맨몸"] or items
+
     # 정렬 우선순위:
     # 1) 비(非)기술 동작 우선 — 올림픽 리프트(클린·스내치·저크)는 기술 난도가 높고
     #    데이터 태깅도 부정확(예: clean and press가 '하체')해서 일반 루틴 선두로 부적절 → 뒤로
-    # 2) 정석 장비(바벨>덤벨>…) 우선
-    # 3) 같은 조건이면 다관절(보조근 많음) 우선 → 컴파운드가 앞으로
+    # 2) 큐레이션된 주류 종목 우선 — 사람들이 실제 쓰는 대표 28종(exercise_map)을
+    #    앞으로. 데이터셋엔 "barbell full squat (back pov)"처럼 near-중복 변형이
+    #    많아 알파벳 tiebreak만으론 비주류 변형이 상단에 뜨는 문제를 막는다.
+    # 3) 중복/비주류 변형 태그((back pov)·(female)·v.2 등)는 후순위
+    # 4) 정석 장비(바벨>덤벨>…) 우선
+    # 5) 같은 조건이면 다관절(보조근 많음) 우선 → 컴파운드가 앞으로
     items.sort(key=lambda it: (
         _is_technical_lift(it["name"]),
+        _is_preferred(it["name"]),
+        _is_junk_variant(it["name"]),
         _EQUIP_PRIORITY.get(it["equipment"], 9),
         -len(it["secondary"]),
         it["name"],
@@ -398,17 +538,105 @@ def _is_technical_lift(name: str) -> int:
     return 1 if any(p in low for p in _TECHNICAL_LIFTS) else 0
 
 
-def _sets_reps(goal: str | None, experience: str | None) -> tuple[int, int]:
-    """목표별 세트×반복 처방. 초보는 세트 수를 한 단계 낮춘다."""
-    table = {
-        "증량": (4, 8),     # 근비대·근력
-        "감량": (3, 15),    # 고반복 대사
-        "유지": (3, 12),
-    }
-    sets, reps = table.get(goal, (3, 12))
+# 큐레이션된 주류 종목명(사용자가 실제 로그하는 대표 28종) → 선택 시 최우선.
+_PREFERRED_NAMES = {v.lower() for v in KO_CANON_TO_LIB.values()}
+
+# 데이터셋에 흔한 near-중복/비주류 변형 태그 — 상단 노출 방지용 후순위 마커.
+_JUNK_MARKERS = ("pov", "female", "male", "(1)", "(2)", "(3)",
+                 "v. 2", "v.2", "version", "wrong")
+
+
+def _is_preferred(name: str) -> int:
+    """큐레이션된 주류 종목이면 0(우선), 아니면 1."""
+    return 0 if name.lower() in _PREFERRED_NAMES else 1
+
+
+def _is_junk_variant(name: str) -> int:
+    """near-중복/비주류 변형 태그가 붙은 이름이면 1(후순위), 아니면 0."""
+    low = name.lower()
+    return 1 if any(m in low for m in _JUNK_MARKERS) else 0
+
+
+# 로테이션은 상위 후보 안에서만 — 데이터셋 꼬리(비주류 변형 수백 개)까지 순환하면
+# 세션이 지날수록 이상한 종목이 튀어나온다. 정렬 상단 주류 종목 안에서만 돌린다.
+_ROTATION_WINDOW = 6
+
+
+def _diversity_key(name: str) -> str:
+    """종목 선택 다양성용 세분 패턴 키(Phase B).
+
+    movement_pattern은 로우/랫풀다운을 둘 다 '당기기'로, 벤치/플라이를 둘 다
+    '밀기'로 뭉갠다. 하루 안에서 상보적 종목(수직+수평 당기기, 프레스+플라이)을
+    고르려면 더 잘게 나눠야 한다.
+    """
+    low = name.lower()
+    if any(k in low for k in ("pulldown", "pull-down", "pull-up", "pullup",
+                              "pull up", "chin-up", "chinup", "chin up")):
+        return "수직당기기"
+    if "row" in low:
+        return "수평당기기"
+    if any(k in low for k in ("overhead press", "shoulder press",
+                              "military press")):
+        return "수직밀기"
+    if any(k in low for k in ("bench press", "chest press", "push-up",
+                              "push up")):
+        return "수평밀기"
+    if any(k in low for k in ("fly", "flye", "crossover", "pec deck")):
+        return "플라이"
+    return movement_pattern(name)
+
+
+def _pick_complementary(candidates: list[dict], count: int,
+                        offset: int) -> list[dict]:
+    """부위별 종목을 count개 고른다 — 대표 컴파운드(0순위)는 고정하고, 나머지
+    슬롯은 (1)아직 안 쓴 움직임 패턴을 우선하고 (2)상위 주류 후보 안에서
+    offset부터 순환해 채운다. → 로우 2종·프레스 2종 같은 중복 대신 상보적 조합
+    (수직+수평 당기기 등)을, 그러면서 세션마다 보조 종목이 바뀌도록.
+    """
+    if count <= 0 or not candidates:
+        return []
+    picks = [candidates[0]]                   # 대표 컴파운드 고정(스쿼트 등)
+    used = {_diversity_key(candidates[0]["name"])}
+    pool = list(candidates[1:_ROTATION_WINDOW])   # 상위 주류 후보로 범위 제한
+    rot = offset
+    while len(picks) < count and pool:
+        # 새 패턴 후보 우선 — 없으면 남은 풀에서 로테이션
+        fresh = [c for c in pool if _diversity_key(c["name"]) not in used]
+        src = fresh or pool
+        pick = src[rot % len(src)]
+        rot += 1
+        picks.append(pick)
+        used.add(_diversity_key(pick["name"]))
+        pool = [c for c in pool if c is not pick]
+    return picks
+
+
+def _prescribe(role: str, goal: str | None, experience: str | None,
+               deload: bool = False,
+               volume_boost: int = 0) -> tuple[int, int, int, str]:
+    """종목 역할별로 (세트, 목표반복, 휴식초, 강도문구)를 처방한다.
+
+    핵심: 반복수는 **종목 역할**이 정한다 — 컴파운드는 저~중반복, 고립은 고반복.
+    목표(goal)는 세트/강도 뉘앙스만 조절하지 반복수를 뒤집지 않는다.
+    (구 버전의 "감량=고반복 15회"는 운동 상식 오류 — 체지방은 식단이 결정.)
+    volume_boost는 메소사이클 축적 주간(디로드 직전 피크)에 세트를 얹는다(Phase D).
+    """
+    if role == "compound":
+        reps = 6 if goal == "증량" else 8        # 저~중반복(근력·근비대)
+        sets = 4 if goal == "증량" else 3
+        rest, rpe = 150, "RPE 7~8 (마지막 2~3회는 힘들게)"
+    else:                                          # isolation
+        reps = 12 if goal == "증량" else 15       # 중~고반복(펌프·대사)
+        sets = 3
+        rest, rpe = 75, "RPE 8~9 (마지막 1~2회 남기고)"
     if experience == "초보":
-        sets = max(2, sets - 1)
-    return sets, reps
+        sets = max(2, sets - 1)                    # 초보는 볼륨 한 단계 낮춤
+    if deload:
+        sets = max(1, sets - 1)                    # 회복 주간: 세트↓
+        rpe = "RPE 5~6 (가볍게, 회복 주간)"
+    else:
+        sets += max(0, volume_boost)               # 축적 주간: 세트↑(디로드 아닐 때만)
+    return sets, reps, rest, rpe
 
 
 def _last_weight_index(history) -> dict[str, dict]:
@@ -433,7 +661,8 @@ def _last_weight_index(history) -> dict[str, dict]:
 
 def _progress(exercise_name: str, last_idx: dict[str, dict],
               part: str, base_reps: int,
-              deload: bool = False) -> tuple[float | None, int]:
+              deload: bool = False,
+              stalled: set[str] | None = None) -> tuple[float | None, int]:
     """직전 기록으로 다음 처방 (target_load, reps)를 정한다.
 
     - 브리지(#13): 처방 영문명 → 정규 한글로 변환 후 last_idx 조회. 큐레이션 28종만
@@ -441,6 +670,8 @@ def _progress(exercise_name: str, last_idx: dict[str, dict],
     - 더블 프로그레션(#14): 직전에 목표 렙(base_reps) 상단을 채웠으면 무게↑,
       못 채웠으면 무게 유지 + 렙 +1.
     - 디로드 주간이면 무게 -10%(회복), 렙은 목표로 리셋.
+    - 정체(Phase D): 최근 N회 같은 무게로 멈춘 종목은 -10% 백오프 후 렙 리셋 —
+      플래토를 깨는 러닝 스타트(디로드와 별개로 종목 단위 발화).
     """
     ko = lib_to_ko_canon(exercise_name)
     last = last_idx.get(ko) if ko is not None else None
@@ -450,6 +681,8 @@ def _progress(exercise_name: str, last_idx: dict[str, dict],
         return None, base_reps
     w = last["weight"]
     if deload:
+        return round(w * 0.9, 1), base_reps
+    if stalled and ko in stalled:          # 종목 단위 정체 → 백오프로 러닝 스타트
         return round(w * 0.9, 1), base_reps
     increment = 5.0 if part == "하체" else 2.5
     last_reps = last.get("reps")
@@ -485,7 +718,8 @@ def _rationale(profile, split_label: str, exercises: list[dict],
 
     msg = (f"오늘은 {split_label} — {goal_phrase} 방향으로 "
            f"{len(exercises)}종 구성했어요. {trend_phrase}.")
-    low = sorted(p for p, s in (balance or {}).items() if s < _WEEKLY_SET_TARGET)
+    target = _weekly_target(normalize_experience(getattr(profile, "experience", None)))
+    low = sorted(p for p, s in (balance or {}).items() if s < target)
     if low:
         msg += f" 이번 주 {'·'.join(low)} 볼륨이 아직 적어 다음 세션에서 보완하면 좋아요."
     if getattr(profile, "injuries", None):

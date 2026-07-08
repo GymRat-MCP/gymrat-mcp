@@ -27,13 +27,19 @@ def update_profile(user_id: str, goal: str | None = None,
                    experience: str | None = None,
                    injuries: str | None = None,
                    persona: str | None = None,
-                   summary_context: str | None = None) -> dict:
+                   summary_context: str | None = None,
+                   available_equipment: str | None = None,
+                   disliked_exercises: str | None = None) -> dict:
     """프로필을 생성/부분 갱신한다(전달된 필드만).
     goal: 증량|감량|유지. experience: 초보|중급|고급. persona: 천사|악마|코치|현실파이터.
     injuries: 부위를 포함한 자유 텍스트(예: "오른쪽 어깨 회전근개")—루틴에서 자극 동작 회피에 사용.
+    available_equipment: 보유 장비(예: "덤벨,맨몸" 또는 "풀짐"/"헬스장")—루틴이 가능한 종목만 처방.
+      "풀짐/헬스장"이면 필터 없음. 홈트 유저가 못 쓰는 바벨 종목을 받지 않게 한다.
+    disliked_exercises: 싫어하거나 못 하는 종목(예: "버피,레그익스텐션")—루틴에서 제외.
     값은 반드시 한글로 보내라(영문/변형도 내부 정규화하지만 한글이 가장 정확)."""
     return profile.update_profile(user_id, goal, experience, injuries,
-                                  persona, summary_context)
+                                  persona, summary_context,
+                                  available_equipment, disliked_exercises)
 
 
 # ---- 기록 ----

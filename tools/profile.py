@@ -64,6 +64,8 @@ def get_profile(user_id: str) -> dict:
             "goal": user.goal,
             "experience": user.experience,
             "injuries": user.injuries,
+            "available_equipment": user.available_equipment,
+            "disliked_exercises": user.disliked_exercises,
             "persona": user.persona,
             "summary_context": user.summary_context,
         }
@@ -78,6 +80,8 @@ def update_profile(
     injuries: str | None = None,
     persona: str | None = None,
     summary_context: str | None = None,
+    available_equipment: str | None = None,
+    disliked_exercises: str | None = None,
 ) -> dict:
     """프로필을 생성/갱신한다. 전달된 필드만 업데이트(부분 갱신)."""
     if persona is not None and persona not in VALID_PERSONAS:
@@ -96,6 +100,10 @@ def update_profile(
             user.experience = normalize_experience(experience)
         if injuries is not None:
             user.injuries = injuries
+        if available_equipment is not None:
+            user.available_equipment = available_equipment
+        if disliked_exercises is not None:
+            user.disliked_exercises = disliked_exercises
         if persona is not None:
             user.persona = persona
         if summary_context is not None:

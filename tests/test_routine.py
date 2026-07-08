@@ -45,15 +45,31 @@ def test_normalize_focus_variants():
     assert routine._normalize_focus("존재안함") is None
 
 
-# ── _sets_reps ─────────────────────────────────────────────
-def test_sets_reps_by_goal():
-    assert routine._sets_reps("증량", None) == (4, 8)
-    assert routine._sets_reps("감량", None) == (3, 15)
-    assert routine._sets_reps("유지", None) == (3, 12)
-    assert routine._sets_reps(None, None) == (3, 12)
+# ── _prescribe (역할별 sets/reps/휴식/강도, Phase A) ────────
+def test_prescribe_compound_low_reps():
+    # 컴파운드는 저~중반복 — 증량이라도 6회(고반복 아님)
+    sets, reps, rest, rpe = routine._prescribe("compound", "증량", None)
+    assert (sets, reps) == (4, 6)
+    assert rest >= 120                     # 컴파운드는 긴 휴식
 
-def test_sets_reps_beginner_lowers_sets():
-    assert routine._sets_reps("증량", "초보") == (3, 8)
+def test_prescribe_isolation_high_reps():
+    # 고립은 중~고반복
+    sets, reps, rest, rpe = routine._prescribe("isolation", "증량", None)
+    assert reps >= 12
+    assert rest <= 90                      # 고립은 짧은 휴식
+
+def test_prescribe_cut_is_not_high_rep_compound():
+    # 회귀: "감량이니까 고반복 15회" 오개념 제거 — 컴파운드는 감량에도 저~중반복
+    _, reps, _, _ = routine._prescribe("compound", "감량", None)
+    assert reps <= 8
+
+def test_prescribe_beginner_lowers_sets():
+    sets, _, _, _ = routine._prescribe("compound", "증량", "초보")
+    assert sets == 3                       # 4 → 3
+
+def test_prescribe_deload_lowers_sets_and_intensity():
+    sets, _, _, rpe = routine._prescribe("compound", "증량", None, deload=True)
+    assert sets == 3 and "회복" in rpe
 
 
 # ── _progress (점진적 과부하 + 더블 프로그레션) ────────────
@@ -103,7 +119,7 @@ def test_build_exercises_structure(monkeypatch):
         ],
     }
     monkeypatch.setattr(routine, "_query_exercises",
-                        lambda part, exp: fake.get(part, []))
+                        lambda part, exp, a=None: fake.get(part, []))
     profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
     history = [SimpleNamespace(parsed=[{"exercise": "barbell bench press", "weight": 80.0}])]
 
@@ -112,8 +128,10 @@ def test_build_exercises_structure(monkeypatch):
     assert len(out) == 3
     first = out[0]
     assert first["exercise"] == "barbell bench press"
-    assert first["sets"] == 4 and first["reps"] == 8       # 증량
+    assert first["role"] == "compound"                      # 벤치=컴파운드
+    assert first["sets"] == 4 and first["reps"] == 6        # 증량 컴파운드
     assert first["target_load"] == 82.5                     # 과부하 반영
+    assert first["rest_sec"] >= 120 and first["intensity"]  # Phase A 필드
     assert first["form_cues"] == ["a"]
 
 def test_build_exercises_excludes_injury_movements(monkeypatch):
@@ -128,7 +146,7 @@ def test_build_exercises_excludes_injury_movements(monkeypatch):
             {"name": "cable pushdown", "form_cues": [], "equipment": "케이블", "secondary": []},
         ],
     }
-    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp: fake.get(part, []))
+    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp, a=None: fake.get(part, []))
     profile = SimpleNamespace(goal="증량", experience="중급", injuries="오른쪽 어깨 회전근개 부상")
     out = routine._build_exercises(["어깨", "삼두"], [], profile, None)
     names = [e["exercise"] for e in out]
@@ -137,12 +155,118 @@ def test_build_exercises_excludes_injury_movements(monkeypatch):
     assert "dumbbell lateral raise" in names   # 안전 종목은 유지
     assert names  # 빈 루틴 아님
 
+def test_pick_complementary_prefers_new_pattern(monkeypatch):
+    # 등: 첫 종목이 수평 당기기(로우)면 둘째는 수직 당기기(랫풀다운) 우선
+    back = [
+        {"name": "barbell bent over row", "form_cues": [], "equipment": "바벨", "secondary": ["이두"]},
+        {"name": "cable seated row", "form_cues": [], "equipment": "케이블", "secondary": ["이두"]},
+        {"name": "cable lat pulldown", "form_cues": [], "equipment": "케이블", "secondary": ["이두"]},
+    ]
+    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp, a=None: back)
+    profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
+    out = routine._build_exercises(["등"], [], profile, None)
+    keys = {routine._diversity_key(e["exercise"]) for e in out}
+    # 로우 2종이 아니라 수평+수직 당기기 조합
+    assert "수평당기기" in keys and "수직당기기" in keys
+
+
 def test_technical_lift_deprioritized():
     # 올림픽/파워 리프트는 일반 루틴 선두에서 밀려야 함
     assert routine._is_technical_lift("barbell clean and press") == 1
     assert routine._is_technical_lift("dumbbell snatch") == 1
     assert routine._is_technical_lift("barbell full squat") == 0
     assert routine._is_technical_lift("barbell bench press") == 0
+
+
+# ── 개인화: 장비 필터 · 선호 제외 (Phase C) ────────────────
+def test_allowed_equipment_parsing():
+    assert routine._allowed_equipment(None) is None
+    assert routine._allowed_equipment("풀짐") is None          # 필터 없음
+    # 홈트: 덤벨만 골라도 맨몸은 항상 포함(빈 루틴 방지)
+    assert routine._allowed_equipment("덤벨") == {"덤벨", "맨몸"}
+    assert routine._allowed_equipment("dumbbell, bodyweight") == {"덤벨", "맨몸"}
+
+def test_disliked_patterns_expands_korean_to_lib():
+    pats = routine._disliked_patterns("레그익스텐션,버피")
+    assert "레그익스텐션" in pats
+    assert "lever leg extension" in pats   # KO_CANON_TO_LIB로 영문 확장
+    assert routine._disliked_patterns(None) == []
+
+def test_build_exercises_filters_equipment(monkeypatch):
+    fake = {"가슴": [
+        {"name": "barbell bench press", "form_cues": [], "equipment": "바벨", "secondary": []},
+        {"name": "dumbbell bench press", "form_cues": [], "equipment": "덤벨", "secondary": []},
+        {"name": "push-up", "form_cues": [], "equipment": "맨몸", "secondary": []},
+    ]}
+    # 실제 필터는 _query_exercises에서 → allowed_equipment 인자로 검증
+    def q(part, exp, allowed=None):
+        items = fake.get(part, [])
+        if allowed:
+            items = [i for i in items if i["equipment"] in allowed]
+        return items
+    monkeypatch.setattr(routine, "_query_exercises", q)
+    profile = SimpleNamespace(goal="증량", experience="중급", injuries=None,
+                              available_equipment="덤벨", disliked_exercises=None)
+    out = routine._build_exercises(["가슴"], [], profile, None)
+    names = [e["exercise"] for e in out]
+    assert "barbell bench press" not in names   # 바벨 없음
+    assert "dumbbell bench press" in names or "push-up" in names
+
+def test_build_exercises_excludes_disliked(monkeypatch):
+    fake = {"하체": [
+        {"name": "barbell full squat", "form_cues": [], "equipment": "바벨", "secondary": []},
+        {"name": "lever leg extension", "form_cues": [], "equipment": "머신", "secondary": []},
+    ]}
+    monkeypatch.setattr(routine, "_query_exercises", lambda p, e, a=None: fake.get(p, []))
+    profile = SimpleNamespace(goal="증량", experience="중급", injuries=None,
+                              available_equipment=None, disliked_exercises="레그익스텐션")
+    out = routine._build_exercises(["하체"], [], profile, None)
+    names = [e["exercise"] for e in out]
+    assert "lever leg extension" not in names
+    assert "barbell full squat" in names
+
+
+# ── 진행/주기화 심화 (Phase D) ─────────────────────────────
+def test_stalled_exercises_detects_flat_weight():
+    # 최근 3회 같은 무게(80) → 정체. 오래된 상승분은 무시.
+    history = [
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0}]),
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0}]),
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 80.0}]),
+        SimpleNamespace(parsed=[{"exercise": "벤치프레스", "weight": 75.0}]),
+    ]
+    assert "벤치프레스" in routine._stalled_exercises(history)
+
+def test_stalled_exercises_not_flagged_when_progressing():
+    history = [
+        SimpleNamespace(parsed=[{"exercise": "스쿼트", "weight": 100.0}]),
+        SimpleNamespace(parsed=[{"exercise": "스쿼트", "weight": 95.0}]),
+        SimpleNamespace(parsed=[{"exercise": "스쿼트", "weight": 90.0}]),
+    ]
+    assert routine._stalled_exercises(history) == set()
+
+def test_progress_stall_backs_off():
+    # 정체 종목 → -10% 백오프(러닝 스타트), 렙 목표 리셋
+    idx = {"벤치프레스": {"weight": 80.0, "sets": 5, "reps": 8}}
+    out = routine._progress("barbell bench press", idx, "가슴", 8,
+                            stalled={"벤치프레스"})
+    assert out == (72.0, 8)
+
+def test_prescribe_volume_boost_adds_set():
+    base, _, _, _ = routine._prescribe("compound", "증량", None)
+    boosted, _, _, _ = routine._prescribe("compound", "증량", None, volume_boost=1)
+    assert boosted == base + 1
+
+def test_prescribe_volume_boost_ignored_on_deload():
+    # 디로드 주간엔 축적 부스트가 무시(회복 우선)
+    sets, _, _, _ = routine._prescribe("compound", "증량", None,
+                                       deload=True, volume_boost=1)
+    assert sets == 3
+
+def test_weekly_target_by_experience():
+    assert routine._weekly_target("초보") == 8
+    assert routine._weekly_target("고급") == 14
+    assert routine._weekly_target(None) == 10
 
 
 def test_injury_filters_keyword_match():
@@ -154,7 +278,7 @@ def test_injury_filters_keyword_match():
 def test_build_exercises_normalizes_experience(monkeypatch):
     # 회귀: "초보자"로 와도 초보 종목 필터가 먹어야 함
     seen = {}
-    def fake_query(part, exp):
+    def fake_query(part, exp, a=None):
         seen["exp"] = exp
         return [{"name": "x", "form_cues": [], "equipment": "바벨", "secondary": []}]
     monkeypatch.setattr(routine, "_query_exercises", fake_query)
@@ -165,7 +289,7 @@ def test_build_exercises_normalizes_experience(monkeypatch):
 def test_build_exercises_respects_session_cap(monkeypatch):
     many = [{"name": f"ex{i}", "form_cues": [], "equipment": "바벨", "secondary": []}
             for i in range(5)]
-    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp: many)
+    monkeypatch.setattr(routine, "_query_exercises", lambda part, exp, a=None: many)
     profile = SimpleNamespace(goal=None, experience=None, injuries=None)
     # 3부위×부위당 2종 = 6 후보지만 48분 → cap = min(8, 48//12=4) = 4로 제한
     out = routine._build_exercises(["가슴", "삼두", "어깨"], [], profile, 48)
