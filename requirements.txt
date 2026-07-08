@@ -1,4 +1,6 @@
-fastmcp>=2.0.0
+# 버전 고정: 미고정(>=) 상태에서 재빌드 때 3.4.3 이 설치되며 Host/Origin 보호가
+# 기본 ON 으로 바뀌어 배포가 421 로 죽은 적 있음. 이후 업그레이드는 의도적으로.
+fastmcp==3.4.3
 sqlalchemy>=2.0.0
 psycopg[binary]>=3.1.0
 python-dotenv>=1.0.0
