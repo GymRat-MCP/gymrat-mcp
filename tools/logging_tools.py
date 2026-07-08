@@ -234,8 +234,16 @@ def _workout_log_note(
     if not valid_items:
         return "운동 기록을 저장했어요. 다음 기록에는 운동명, 무게, 세트, 반복을 같이 알려주면 더 정확하게 볼게요."
 
-    names = [item["exercise"] for item in valid_items[:3]]
-    suffix = "" if len(valid_items) <= 3 else f" 외 {len(valid_items) - 3}개"
+    # 같은 종목이 여러 세트로 들어와도 이름은 한 번만(중복 제거, 순서 유지).
+    # 예: 벤치 4세트 → "벤치프레스"(과거엔 "벤치, 벤치, 벤치 외 1개"로 나감).
+    unique_names: list[str] = []
+    for item in valid_items:
+        name = item["exercise"]
+        if name not in unique_names:
+            unique_names.append(name)
+
+    names = unique_names[:3]
+    suffix = "" if len(unique_names) <= 3 else f" 외 {len(unique_names) - 3}개"
     if needs:
         return (
             f"{', '.join(names)}{suffix} 기록을 저장했어요. "
