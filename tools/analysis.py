@@ -5,10 +5,10 @@
 """
 from datetime import datetime, time, timedelta
 from db.session import SessionLocal
-from db.models import WeightLog, WorkoutLog, InbodyLog, MealLog
+from db.models import WeightLog, WorkoutLog, InbodyLog, MealLog, ExerciseSet
 from tools.meal_intel import classify_meal_text, summarize_meal_classifications
 from tools.persona import apply_persona, get_persona, persona_response_fields
-from tools.workout_parser import session_volume
+from tools.workout_parser import session_volume, normalize_exercise
 
 _session_volume = session_volume
 
@@ -310,4 +310,131 @@ def _trend_meal(user_id: str, since) -> dict:
         "summary": summary,
         "flag": flag,
         "meal_pattern": meal_pattern,
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# P1 — e1RM & 종목별 히스토리 (ExerciseSet 기반)
+# "내 벤치가 는다"를 숫자로. ②(진전 가시화)의 본체.
+# ─────────────────────────────────────────────────────────────
+
+_E1RM_HIGH_REP = 12   # reps>이면 e1RM 신뢰도 낮음(가드레일 표시)
+
+
+def estimate_1rm(weight, reps) -> float | None:
+    """Epley 추정 1RM: weight*(1+reps/30). reps=1이면 그대로.
+
+    맨몸(weight=None)이거나 reps가 없/무효(<1)면 None(추정 불가).
+    reps>12는 신뢰도가 낮아지지만 값은 계산한다(호출부에서 플래그).
+    """
+    if weight is None or reps is None:
+        return None
+    try:
+        w = float(weight)
+        r = int(reps)
+    except (TypeError, ValueError):
+        return None
+    if r < 1:
+        return None
+    if r == 1:
+        return w
+    return w * (1 + r / 30)
+
+
+def _exercise_series(user_id: str, exercise: str, since) -> list[dict]:
+    """종목 단일 시계열을 ExerciseSet에서 집계한다.
+
+    워밍업 세트는 통계에서 제외하고, 날짜별로
+      top_weight(최고 중량), best_e1rm(최고 추정 1RM), volume(Σ weight*reps)
+    를 만든다. exercise 는 normalize_exercise 로 정규화해 조회한다.
+    반환: [{date(iso), top_weight, best_e1rm, volume}] (날짜 오름차순)
+    """
+    canon = normalize_exercise(exercise)
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(ExerciseSet)
+            .filter(ExerciseSet.user_id == user_id,
+                    ExerciseSet.exercise == canon,
+                    ExerciseSet.date >= since,
+                    ExerciseSet.is_warmup.isnot(True))   # 워밍업 제외(None=본세트 취급)
+            .order_by(ExerciseSet.date.asc(), ExerciseSet.id.asc())
+            .all()
+        )
+    finally:
+        session.close()
+
+    # 날짜별 집계(입력 순서 유지 → 날짜 오름차순 보존)
+    by_date: dict = {}
+    for r in rows:
+        day = r.date
+        agg = by_date.setdefault(day, {"top_weight": None, "best_e1rm": None,
+                                       "volume": 0.0, "high_rep": False})
+        if r.weight is not None:
+            if agg["top_weight"] is None or r.weight > agg["top_weight"]:
+                agg["top_weight"] = float(r.weight)
+            if r.reps:
+                agg["volume"] += float(r.weight) * int(r.reps)
+        e = estimate_1rm(r.weight, r.reps)
+        if e is not None:
+            if agg["best_e1rm"] is None or e > agg["best_e1rm"]:
+                agg["best_e1rm"] = e
+            if r.reps and int(r.reps) > _E1RM_HIGH_REP:
+                agg["high_rep"] = True
+
+    points = []
+    for day, agg in by_date.items():
+        points.append({
+            "date": day.isoformat(),
+            "top_weight": agg["top_weight"],
+            "best_e1rm": round(agg["best_e1rm"], 1) if agg["best_e1rm"] is not None else None,
+            "volume": round(agg["volume"], 1),
+        })
+    return points
+
+
+def get_exercise_history(user_id: str, exercise: str,
+                         period_days: int = 90) -> dict:
+    """종목별 단일 시계열 + e1RM 추세를 반환한다(P1).
+
+    반환: {exercise(정규화명), points[], e1rm_trend:{direction, pct_change}, note, flag}
+    가드레일: note 는 방향성·질적 문장. pct_change 는 데이터 필드(참고용).
+    응답에 assistant_message 가 있으면 사용자에게 이 문장을 우선 전달한다.
+    """
+    canon = normalize_exercise(exercise)
+    since = datetime.now().date() - timedelta(days=period_days)
+    points = _exercise_series(user_id, exercise, since)
+
+    # e1RM 추세: e1rm 있는 포인트만으로 첫 vs 마지막 비교
+    e1rm_points = [p for p in points if p["best_e1rm"] is not None]
+    if len(e1rm_points) < 2:
+        base = (f"{canon} 기록이 조금 더 쌓이면 힘 추세를 보여드릴게요."
+                if points else f"최근 {period_days}일 동안 {canon} 기록이 없어요.")
+        return _with_persona(user_id, {
+            "exercise": canon,
+            "points": points,
+            "e1rm_trend": {"direction": "flat", "pct_change": None},
+            "note": base,
+            "summary": base,
+            "flag": "insufficient_data",
+        })
+
+    first = e1rm_points[0]["best_e1rm"]
+    last = e1rm_points[-1]["best_e1rm"]
+    direction = _direction(first, last, eps=first * 0.02)   # 2% 미만은 flat
+    pct_change = round((last - first) / first * 100, 1) if first else None
+
+    base = {
+        "up":   f"{canon} 추정 1RM이 오르는 흐름이에요. 힘이 붙고 있어요.",
+        "down": f"{canon} 추정 1RM이 내려가는 흐름이에요. 피로·컨디션이나 폼을 점검해봐요.",
+        "flat": f"{canon} 추정 1RM은 대체로 유지 중이에요. 무게나 반복을 살짝 올려 자극을 줄 때.",
+    }[direction]
+
+    return _with_persona(user_id, {
+        "exercise": canon,
+        "points": points,
+        "e1rm_trend": {"direction": direction, "pct_change": pct_change},
+        "note": base,
+        "summary": base,
+        "flag": None,
     })
