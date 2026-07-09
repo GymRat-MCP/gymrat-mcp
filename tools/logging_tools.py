@@ -1,7 +1,7 @@
 """기록 툴 — 체중 / 인바디 / 운동 / 식단"""
 from datetime import date as date_cls, datetime
 from db.session import SessionLocal
-from db.models import WeightLog, InbodyLog, WorkoutLog, MealLog, User
+from db.models import WeightLog, InbodyLog, WorkoutLog, MealLog, User, ExerciseSet
 from tools.persona import (
     DEFAULT_PERSONA,
     apply_persona,
@@ -249,6 +249,33 @@ def _workout_log_note(
     return f"{', '.join(names)}{suffix} 기록을 저장했어요. 다음 처방에 바로 반영할게요."
 
 
+def _expand_to_sets(parsed: list[dict], user_id: str, log_date,
+                    log_id: int | None) -> list[ExerciseSet]:
+    """parsed 항목을 세트 단위 ExerciseSet 행으로 전개(P0 듀얼라이트).
+
+    sets=N 이면 동일 무게/반복의 세트 N행(set_no 1..N)으로 편다(세트별 상세가
+    아직 없으므로 근사). 종목명이 비면 건너뛰고, 맨몸은 weight=None 을 유지한다.
+    """
+    rows: list[ExerciseSet] = []
+    for item in parsed or []:
+        exercise = item.get("exercise")
+        if not exercise:
+            continue
+        weight = item.get("weight")
+        reps = item.get("reps")
+        try:
+            n_sets = int(item.get("sets"))
+        except (TypeError, ValueError):
+            n_sets = 1
+        n_sets = max(1, n_sets)
+        for set_no in range(1, n_sets + 1):
+            rows.append(ExerciseSet(
+                user_id=user_id, date=log_date, exercise=exercise,
+                set_no=set_no, weight=weight, reps=reps, log_id=log_id,
+            ))
+    return rows
+
+
 def log_workout(user_id: str, raw_text: str,
                 exercises: list[dict] | None = None,
                 date: str | None = None,
@@ -275,10 +302,16 @@ def log_workout(user_id: str, raw_text: str,
                        if confirm_with_history else [])
         # 자동 채움 후 남은 누락만 다시 계산 → 채워진 항목은 자연히 제외
         needs = needs_confirmation(parsed)
-        session.add(WorkoutLog(
-            user_id=user_id, date=_parse_date(date),
+        log_date = _parse_date(date)
+        log = WorkoutLog(
+            user_id=user_id, date=log_date,
             raw_text=raw_text, parsed=parsed,
-        ))
+        )
+        session.add(log)
+        session.flush()   # log.id 확보 → 세트 역참조에 사용
+        # 듀얼라이트(P0): parsed 를 세트 단위로 전개해 ExerciseSet 에도 기록
+        for s in _expand_to_sets(parsed, user_id, log_date, log.id):
+            session.add(s)
         session.commit()
         base_note = _workout_log_note(parsed, needs, auto_filled)
         note = apply_persona(base_note, persona)
