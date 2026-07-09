@@ -114,6 +114,16 @@ def analyze_trend(user_id: str, metric: str = "weight",
     return analysis.analyze_trend(user_id, metric, period_days)
 
 
+@mcp.tool()
+def get_exercise_history(user_id: str, exercise: str,
+                         period_days: int = 90) -> dict:
+    """특정 종목의 힘 추세를 보여준다("내 벤치가 는다"를 숫자로).
+    exercise: 종목명(벤치/스쿼트/데드 등 — 서버가 정규화). 날짜별 최고중량·추정 1RM·볼륨
+    시계열과 e1RM 방향성(up|down|flat)·변화율을 반환한다. 워밍업 세트는 통계 제외.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
+    return analysis.get_exercise_history(user_id, exercise, period_days)
+
+
 # ---- 처방·코칭 ----
 @mcp.tool()
 def generate_routine(user_id: str, focus: str | None = None,
