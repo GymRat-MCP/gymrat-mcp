@@ -468,6 +468,9 @@ def _build_exercises(targets: list[str], history, profile,
                 role, goal, experience, deload, volume_boost)
             load, ex_reps = _progress(ex["name"], last_idx, part, reps,
                                       deload, stalled)
+            # P3: 오늘의 구체적 목표(무게×반복) + 처방 노트 표면화
+            prescription = _next_target(ex["name"], last_idx, part, sets, reps,
+                                        load, ex_reps, deload, stalled)
             result.append({
                 "exercise": ex["name"],            # 영문(출력 시 한글화)
                 "target": part,
@@ -478,6 +481,7 @@ def _build_exercises(targets: list[str], history, profile,
                 "rest_sec": rest_sec,              # 세트 간 휴식(Phase A)
                 "intensity": intensity,            # 목표 강도(RPE, Phase A)
                 "target_load": load,
+                "prescription": prescription,      # P3: {weight,reps,sets,scheme,note}
                 "form_cues": ex["form_cues"] or [],
             })
     return result
@@ -689,6 +693,53 @@ def _progress(exercise_name: str, last_idx: dict[str, dict],
     if last_reps is None or last_reps >= base_reps:
         return round(w + increment, 1), base_reps   # 목표 렙 달성 → 무게↑
     return w, last_reps + 1                          # 미달 → 무게 유지, 렙 +1
+
+
+def _fmt_kg(w: float | None) -> str:
+    """무게를 사람이 읽는 문자열로. None(맨몸)은 '맨몸'."""
+    if w is None:
+        return "맨몸"
+    return f"{w:g}kg"
+
+
+def _next_target(exercise_name: str, last_idx: dict[str, dict], part: str,
+                 sets: int, base_reps: int, load: float | None, ex_reps: int,
+                 deload: bool, stalled: set[str] | None) -> dict:
+    """P3: 오늘의 구체적 목표(무게×반복) + 사람이 읽는 처방 노트.
+
+    `_progress`가 이미 계산한 (load, ex_reps)를 받아 '왜 이 수치인가'를
+    직전 세션과 대비해 설명한다. 처방을 "종목 나열"에서 "몇 kg 몇 개"로
+    표면화(출력 계약 강화)하는 게 핵심 — 룰 자체는 _progress가 소유.
+    """
+    # last_idx 조회 키: 브리지가 되면 ko, 안 되면 영문/원문 직접 매칭(_progress와 동일)
+    ko = lib_to_ko_canon(exercise_name)
+    key = ko if (ko is not None and ko in last_idx) else exercise_name
+    last = last_idx.get(key)
+    scheme = f"{sets}×{ex_reps}"
+    target = {"weight": load, "reps": ex_reps, "sets": sets, "scheme": scheme}
+
+    if last is None or load is None:       # 이력 없음 → 보수적 시작 안내
+        target["note"] = (f"첫 기록이라 부담 없는 무게로 {ex_reps}회씩 폼부터 잡고, "
+                          "다음 세션부터 조금씩 올려가요.")
+        return target
+
+    pw, pr = last.get("weight"), last.get("reps")
+    prev_desc = _fmt_kg(pw) + (f" {pr}회" if pr else "")
+    if deload:
+        target["note"] = (f"회복 주간 — 지난 {prev_desc}에서 {_fmt_kg(load)}로 낮춰 "
+                          f"{ex_reps}회, 폼·컨디션 회복에 집중해요.")
+    elif stalled and key in stalled:
+        target["note"] = (f"최근 {_fmt_kg(pw)}에서 정체 — {_fmt_kg(load)}로 한 발 "
+                          "물러나 러닝 스타트 후 다시 올려요.")
+    elif pw is not None and load > pw:
+        target["note"] = (f"지난번 {prev_desc} 달성 → 오늘 {_fmt_kg(load)} {ex_reps}회 "
+                          f"도전! (미달 시 {_fmt_kg(pw)}로 반복수부터 채워요)")
+    elif ex_reps > (pr or 0):
+        target["note"] = (f"지난번 {prev_desc} → 오늘 같은 {_fmt_kg(load)}로 {ex_reps}회 "
+                          "목표 (반복수 늘리기)")
+    else:
+        target["note"] = f"{_fmt_kg(load)} {scheme}로 유지하며 자극의 질에 집중해요."
+    return target
 
 
 def _rationale(profile, split_label: str, exercises: list[dict],
