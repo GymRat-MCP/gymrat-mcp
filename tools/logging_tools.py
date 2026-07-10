@@ -11,7 +11,7 @@ from tools.persona import (
 )
 from tools.meal_intel import classify_meal_text, meal_feedback
 from tools.workout_parser import (
-    parse_workout, normalize_exercise, needs_confirmation,
+    parse_workout, normalize_exercise, needs_confirmation, parse_relative_date,
 )
 from tools.analysis import _detect_prs, pr_headline
 
@@ -21,12 +21,14 @@ def _today():
 
 
 def _parse_date(s: str | None):
+    """날짜 문자열을 date로. YYYY-MM-DD 우선, 아니면 상대표현("어제", "3주 전"),
+    그래도 못 읽으면 오늘로 폴백(P4)."""
     if not s:
         return _today()
     try:
         return datetime.strptime(s, "%Y-%m-%d").date()
     except ValueError:
-        return _today()
+        return parse_relative_date(s) or _today()
 
 
 def _fmt_delta(value: float | None, unit: str) -> str | None:
@@ -270,6 +272,8 @@ def _expand_to_sets(parsed: list[dict], user_id: str, log_date,
             continue
         weight = item.get("weight")
         reps = item.get("reps")
+        # 항목별 date 오버라이드 허용(P4): 온보딩 시 종목마다 다른 과거 날짜.
+        item_date = _parse_date(item["date"]) if item.get("date") else log_date
         try:
             n_sets = int(item.get("sets"))
         except (TypeError, ValueError):
@@ -277,7 +281,7 @@ def _expand_to_sets(parsed: list[dict], user_id: str, log_date,
         n_sets = max(1, n_sets)
         for set_no in range(1, n_sets + 1):
             rows.append(ExerciseSet(
-                user_id=user_id, date=log_date, exercise=exercise,
+                user_id=user_id, date=item_date, exercise=exercise,
                 set_no=set_no, weight=weight, reps=reps, log_id=log_id,
             ))
     return rows
@@ -342,6 +346,88 @@ def log_workout(user_id: str, raw_text: str,
     finally:
         session.close()
 
+
+
+def _delete_sets_for_log(session, log_id: int) -> int:
+    """해당 WorkoutLog의 ExerciseSet 행을 모두 삭제하고 삭제 수를 반환한다."""
+    return (session.query(ExerciseSet)
+            .filter(ExerciseSet.log_id == log_id)
+            .delete(synchronize_session=False))
+
+
+def edit_workout(user_id: str, log_id: int,
+                 exercises: list[dict] | None = None,
+                 raw_text: str | None = None,
+                 date: str | None = None) -> dict:
+    """기존 운동 기록을 수정한다(P4). 무게·반복 오타 교정, 날짜 정정 등.
+
+    - exercises: 주면 parsed를 통째로 교체하고 ExerciseSet도 다시 전개한다.
+      (부분 수정도 호스트가 전체 배열을 다시 채워 넘기는 방식으로 처리)
+    - date: 주면 로그와 그 세트들의 날짜를 함께 옮긴다(상대표현도 인식).
+    - 본인(user_id) 소유 로그만 수정 — 남의 기록은 건드리지 않는다.
+    듀얼라이트(WorkoutLog·ExerciseSet) 정합성을 함께 갱신한다.
+    """
+    session = SessionLocal()
+    try:
+        log = session.get(WorkoutLog, log_id)
+        if log is None or log.user_id != user_id:
+            return {"updated": False, "error": "해당 기록을 찾을 수 없어요."}
+
+        new_date = _parse_date(date) if date else log.date
+        if exercises is not None:
+            parsed = [dict(item) for item in exercises]
+            for item in parsed:
+                item["exercise"] = normalize_exercise(item.get("exercise", ""))
+            log.parsed = parsed
+            if raw_text is not None:
+                log.raw_text = raw_text
+            log.date = new_date
+            # 세트 재전개: 기존 세트 제거 후 새 parsed로 다시 생성.
+            _delete_sets_for_log(session, log.id)
+            for s in _expand_to_sets(parsed, user_id, new_date, log.id):
+                session.add(s)
+        else:
+            # parsed 변경 없이 날짜/원문만 정정.
+            if raw_text is not None:
+                log.raw_text = raw_text
+            if date:
+                log.date = new_date
+                (session.query(ExerciseSet)
+                 .filter(ExerciseSet.log_id == log.id)
+                 .update({ExerciseSet.date: new_date},
+                         synchronize_session=False))
+
+        session.commit()
+        return {"updated": True, "log_id": log.id,
+                "date": log.date.isoformat(), "parsed": log.parsed,
+                "note": "기록을 수정했어요. 통계에도 바로 반영돼요."}
+    except Exception as e:
+        session.rollback()
+        return {"updated": False, "error": str(e)}
+    finally:
+        session.close()
+
+
+def delete_workout(user_id: str, log_id: int) -> dict:
+    """운동 기록을 삭제한다(P4). WorkoutLog와 연결된 ExerciseSet를 함께 지운다.
+
+    본인(user_id) 소유 로그만 삭제. 잘못 남긴 기록 제거 후 통계에서도 빠진다.
+    """
+    session = SessionLocal()
+    try:
+        log = session.get(WorkoutLog, log_id)
+        if log is None or log.user_id != user_id:
+            return {"deleted": False, "error": "해당 기록을 찾을 수 없어요."}
+        n_sets = _delete_sets_for_log(session, log.id)
+        session.delete(log)
+        session.commit()
+        return {"deleted": True, "log_id": log_id, "removed_sets": n_sets,
+                "note": "기록을 삭제했어요. 통계에서도 제외돼요."}
+    except Exception as e:
+        session.rollback()
+        return {"deleted": False, "error": str(e)}
+    finally:
+        session.close()
 
 
 def log_meal(user_id: str, photo_analysis: str,
