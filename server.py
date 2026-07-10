@@ -148,6 +148,25 @@ def get_exercise_history(user_id: str, exercise: str,
     return analysis.get_exercise_history(user_id, exercise, period_days)
 
 
+@mcp.tool()
+def get_weekly_recap(user_id: str, week_offset: int = 0) -> dict:
+    """주간 운동 리캡 — 세션수·총 볼륨·부위별 볼륨·지난주 대비 변화·신규 PR·
+    보완 부위를 한 번에 요약한다. week_offset=0은 최근 7일, 1은 그 이전 주.
+    응답 note/nudges/assistant_message가 있으면 사용자에게 우선 전달한다."""
+    return analysis.get_weekly_recap(user_id, week_offset)
+
+
+@mcp.tool()
+def get_goal_projection(user_id: str, exercise: str, target_weight: float,
+                        by_date: str | None = None) -> dict:
+    """목표 무게 도달 예상일을 투영한다("9월까지 벤치 100kg").
+    exercise: 종목명(서버가 정규화). target_weight: 목표 추정 1RM(kg).
+    by_date(선택, "YYYY-MM-DD"): 이 시점 안에 닿을지(on_track) 판정.
+    최근 e1RM 상승률로 선형 투영하며, 정체·하락이면 도달 시점을 잡지 않는다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
+    return analysis.get_goal_projection(user_id, exercise, target_weight, by_date)
+
+
 # ---- 처방·코칭 ----
 @mcp.tool()
 def generate_routine(user_id: str, focus: str | None = None,

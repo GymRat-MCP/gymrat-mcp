@@ -4,12 +4,13 @@
 ⚠️ 가드레일: 정확 수치 단정 ❌ → 방향성·질적 summary 중심.
 """
 from collections import defaultdict
-from datetime import datetime, time, timedelta
+from datetime import datetime, date as _date, time, timedelta
 from db.session import SessionLocal
 from db.models import WeightLog, WorkoutLog, InbodyLog, MealLog, ExerciseSet
 from tools.meal_intel import classify_meal_text, summarize_meal_classifications
 from tools.persona import apply_persona, get_persona, persona_response_fields
 from tools.workout_parser import session_volume, normalize_exercise
+from tools.exercise_map import log_name_to_part
 
 _session_volume = session_volume
 
@@ -588,3 +589,215 @@ def pr_headline(prs: list[dict]) -> str:
     if others > 0:
         head += f" (그 외 기록 {others}개도 함께 경신했어요)"
     return head
+
+
+# ─────────────────────────────────────────────────────────────
+# P5 — 유지 레이어: 주간 리캡 · 목표 마일스톤 (ExerciseSet 기반)
+# 재료(볼륨·부위균형·PR·e1RM)는 이미 있음 → 집계·요약·투영만.
+# ─────────────────────────────────────────────────────────────
+
+_WEEKLY_SET_LANDMARK = 10   # 부위별 주당 최소 세트 하한(routine과 동일 기준)
+
+
+def _sets_in_window(user_id: str, start, end) -> list:
+    """[start, end] 기간의 본세트(워밍업 제외) ExerciseSet 행."""
+    session = SessionLocal()
+    try:
+        return (
+            session.query(ExerciseSet)
+            .filter(ExerciseSet.user_id == user_id,
+                    ExerciseSet.date >= start, ExerciseSet.date <= end,
+                    ExerciseSet.is_warmup.isnot(True))
+            .all()
+        )
+    finally:
+        session.close()
+
+
+def _aggregate_week(rows) -> dict:
+    """주간 세트 행 → 세션수·톤수·부위별 세트/볼륨 집계."""
+    dates = set()
+    tonnage = 0.0
+    part_sets: dict[str, int] = {}
+    part_volume: dict[str, float] = {}
+    for r in rows:
+        dates.add(r.date)
+        part = log_name_to_part(r.exercise)
+        if part:
+            part_sets[part] = part_sets.get(part, 0) + 1
+        if r.weight is not None and r.reps:
+            vol = float(r.weight) * int(r.reps)
+            tonnage += vol
+            if part:
+                part_volume[part] = part_volume.get(part, 0.0) + vol
+    return {"sessions": len(dates), "tonnage": round(tonnage, 1),
+            "part_sets": part_sets,
+            "part_volume": {k: round(v, 1) for k, v in part_volume.items()}}
+
+
+def _weekly_prs(user_id: str, start, end) -> list[dict]:
+    """이 주에 종목별 역대 최고(중량 또는 e1RM)를 경신했는지 집계(P5).
+
+    이번 주 최고를 start 이전 전체 기록의 최고와 비교한다(그 주가 신기록인가).
+    """
+    cur = _sets_in_window(user_id, start, end)
+    by_ex_cur: dict[str, list] = defaultdict(list)
+    for r in cur:
+        by_ex_cur[r.exercise].append(r)
+
+    session = SessionLocal()
+    prs: list[dict] = []
+    try:
+        for exercise, rows in by_ex_cur.items():
+            cur_w = max((float(r.weight) for r in rows if r.weight is not None),
+                        default=None)
+            cur_e = max((e for r in rows
+                         if (e := estimate_1rm(r.weight, r.reps)) is not None),
+                        default=None)
+            prior = (session.query(ExerciseSet)
+                     .filter(ExerciseSet.user_id == user_id,
+                             ExerciseSet.exercise == exercise,
+                             ExerciseSet.date < start,
+                             ExerciseSet.is_warmup.isnot(True)).all())
+            if not prior:
+                continue   # 이번 주가 첫 등장 → PR 아님
+            prior_w = max((float(r.weight) for r in prior
+                           if r.weight is not None), default=None)
+            prior_e = max((e for r in prior
+                           if (e := estimate_1rm(r.weight, r.reps)) is not None),
+                          default=None)
+            if cur_w is not None and prior_w is not None and cur_w > prior_w:
+                prs.append({"exercise": exercise, "type": "weight",
+                            "value": round(cur_w, 1), "prev": round(prior_w, 1)})
+            elif cur_e is not None and prior_e is not None and cur_e > prior_e:
+                prs.append({"exercise": exercise, "type": "e1rm",
+                            "value": round(cur_e, 1), "prev": round(prior_e, 1)})
+    finally:
+        session.close()
+    return prs
+
+
+def get_weekly_recap(user_id: str, week_offset: int = 0) -> dict:
+    """주간 리캡(P5): 세션수·총 톤수·부위별 볼륨 Δ·신규 PR·미달 부위·넛지.
+
+    week_offset=0 은 최근 7일, 1은 그 이전 7일. 이전 주와 비교해 톤수 변화와
+    보완 부위를 짚는다. 응답 note/nudges 를 사용자에게 전달한다.
+    """
+    today = datetime.now().date()
+    end = today - timedelta(days=7 * week_offset)
+    start = end - timedelta(days=6)
+    prev_end = start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=6)
+
+    cur = _aggregate_week(_sets_in_window(user_id, start, end))
+    prev = _aggregate_week(_sets_in_window(user_id, prev_start, prev_end))
+    prs = _weekly_prs(user_id, start, end)
+
+    tonnage_delta = round(cur["tonnage"] - prev["tonnage"], 1)
+    under_target = sorted(
+        p for p in cur["part_sets"] if cur["part_sets"][p] < _WEEKLY_SET_LANDMARK)
+
+    nudges: list[str] = []
+    if cur["sessions"] == 0:
+        base = "이번 주엔 아직 운동 기록이 없어요. 가볍게라도 한 세션 남겨볼까요?"
+        nudges.append("이번 주 운동 기록이 비어 있어요. 30분이라도 움직여봐요.")
+        flag = "no_sessions"
+    else:
+        parts = [f"세션 {cur['sessions']}회", f"총 볼륨 {cur['tonnage']:g}"]
+        if prev["sessions"]:
+            trend_word = ("늘었어요" if tonnage_delta > 0
+                          else "줄었어요" if tonnage_delta < 0 else "비슷해요")
+            parts.append(f"지난주 대비 볼륨이 {trend_word}")
+        base = "이번 주 리캡 — " + ", ".join(parts) + "."
+        if prs:
+            base += f" 신기록 {len(prs)}개를 세웠어요! 🎉"
+        if under_target:
+            nudges.append(
+                f"{'·'.join(under_target)} 볼륨이 주당 권장({_WEEKLY_SET_LANDMARK}세트)"
+                "에 못 미쳐요. 다음 세션에서 보완하면 좋아요.")
+        flag = None
+
+    return _with_persona(user_id, {
+        "week_offset": week_offset,
+        "period": {"start": start.isoformat(), "end": end.isoformat()},
+        "sessions": cur["sessions"],
+        "tonnage": cur["tonnage"],
+        "tonnage_delta": tonnage_delta,
+        "part_volume": cur["part_volume"],
+        "part_sets": cur["part_sets"],
+        "new_prs": prs,
+        "under_target_parts": under_target,
+        "nudges": nudges,
+        "summary": base,
+        "note": base,
+        "flag": flag,
+    })
+
+
+def get_goal_projection(user_id: str, exercise: str, target_weight: float,
+                        by_date: str | None = None) -> dict:
+    """목표 마일스톤 투영(P5): 현재 추정 1RM + 최근 상승률로 도달 예상일.
+
+    "9월까지 벤치 100kg" → 최근 e1RM 시계열의 주당 상승률로 target_weight(1RM)
+    도달 시점을 선형 투영한다. by_date(YYYY-MM-DD) 주면 그 전에 닿을지(on_track).
+    상승률이 0 이하면 투영 불가(더 밀어야 함).
+    """
+    canon = normalize_exercise(exercise)
+    today = datetime.now().date()
+    points = _exercise_series(user_id, exercise, today - timedelta(days=90))
+    e1rm_points = [p for p in points if p["best_e1rm"] is not None]
+
+    def _wrap(note, **extra):
+        return _with_persona(user_id, {
+            "exercise": canon, "target_weight": target_weight,
+            "note": note, "summary": note, **extra})
+
+    if not e1rm_points:
+        return _wrap(f"{canon} 기록이 아직 없어요. 몇 번 기록하면 도달 예상일을 잡아볼게요.",
+                     current_e1rm=None, projected_date=None,
+                     on_track=None, flag="insufficient_data")
+
+    current = e1rm_points[-1]["best_e1rm"]
+    if current >= target_weight:
+        return _wrap(f"이미 {canon} 추정 1RM {current:g}kg로 목표 {target_weight:g}kg를 "
+                     "넘었어요! 새 목표를 잡아봐요.",
+                     current_e1rm=current, projected_date=None,
+                     on_track=True, flag="achieved")
+
+    if len(e1rm_points) < 2:
+        return _wrap(f"{canon} 상승 추세를 보려면 기록이 조금 더 필요해요.",
+                     current_e1rm=current, projected_date=None,
+                     on_track=None, flag="insufficient_data")
+
+    first = e1rm_points[0]
+    last = e1rm_points[-1]
+    span_days = (_date.fromisoformat(last["date"])
+                 - _date.fromisoformat(first["date"])).days
+    if span_days <= 0:
+        rate_per_week = 0.0
+    else:
+        rate_per_week = (last["best_e1rm"] - first["best_e1rm"]) / span_days * 7
+
+    if rate_per_week <= 0:
+        return _wrap(f"{canon} 추정 1RM이 최근 정체·하락 흐름이라 지금 속도로는 목표 "
+                     f"{target_weight:g}kg 도달 시점을 잡기 어려워요. 자극·회복을 점검해봐요.",
+                     current_e1rm=current, rate_per_week=round(rate_per_week, 2),
+                     projected_date=None, on_track=False, flag="stalled")
+
+    weeks_needed = (target_weight - current) / rate_per_week
+    projected = today + timedelta(days=round(weeks_needed * 7))
+    note = (f"{canon} 추정 1RM {current:g}kg, 최근 주당 약 {rate_per_week:.1f}kg 상승 중 "
+            f"→ 목표 {target_weight:g}kg는 {projected.isoformat()}쯤 도달 예상이에요.")
+    on_track = None
+    if by_date:
+        try:
+            deadline = _date.fromisoformat(by_date)
+            on_track = projected <= deadline
+            note += (" 목표 시점 안에 충분히 닿을 페이스예요." if on_track
+                     else " 목표 시점보단 조금 늦을 수 있어 볼륨을 더 올려볼까요?")
+        except ValueError:
+            pass
+    return _wrap(note, current_e1rm=current,
+                 rate_per_week=round(rate_per_week, 2),
+                 projected_date=projected.isoformat(),
+                 on_track=on_track, flag=None)
