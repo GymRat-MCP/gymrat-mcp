@@ -3,6 +3,7 @@
 이 시계열 누적·분석이 MCP의 차별점(일반 챗봇은 못 함).
 ⚠️ 가드레일: 정확 수치 단정 ❌ → 방향성·질적 summary 중심.
 """
+from collections import defaultdict
 from datetime import datetime, time, timedelta
 from db.session import SessionLocal
 from db.models import WeightLog, WorkoutLog, InbodyLog, MealLog, ExerciseSet
@@ -438,3 +439,152 @@ def get_exercise_history(user_id: str, exercise: str,
         "summary": base,
         "flag": None,
     })
+
+
+# ─────────────────────────────────────────────────────────────
+# P2 — PR 추적 & 축하 (ExerciseSet 기반, estimate_1rm 공유)
+# 기록 저장 시 종목별 과거 대비 신기록을 자동 감지 → 리텐션 도파민.
+# ─────────────────────────────────────────────────────────────
+
+# 노트 축하 문구를 고를 때의 우선순위(낮을수록 먼저).
+_PR_PRIORITY = {"weight": 0, "e1rm": 1, "reps": 2, "volume": 3}
+
+
+def _detect_prs(session, user_id: str, parsed: list[dict]) -> list[dict]:
+    """이번 기록이 종목별 과거 대비 신기록(PR)인지 판정한다(P2).
+
+    ExerciseSet(이미 저장된 과거분)만 조회해 '이전 최고'와 비교한다.
+    ⚠️ 반드시 이번 세트를 session.add 하기 **전에** 호출해야 자기 자신과
+    비교하지 않는다. 첫 기록(비교 대상 없음)은 PR 로 치지 않는다.
+
+    감지 타입:
+      - weight : 최고 중량 경신
+      - e1rm   : 최고 추정 1RM 경신(Epley)
+      - reps   : 동일 무게에서 최다 반복 경신
+      - volume : 단일 세션 볼륨(Σ weight*reps) 경신
+
+    반환: [{exercise, type, value, prev, unit, (weight)}]  (없으면 [])
+    """
+    # 이번 기록을 종목별로 모은다(같은 종목 여러 항목 가능).
+    new_by_ex: dict[str, list[dict]] = defaultdict(list)
+    for item in parsed or []:
+        ex = item.get("exercise")
+        if ex:
+            new_by_ex[ex].append(item)
+
+    prs: list[dict] = []
+    for exercise, items in new_by_ex.items():
+        # 이번 세션의 후보 신기록 집계(sets 만큼 전개된 것으로 간주).
+        new_top_weight = None
+        new_best_e1rm = None
+        new_reps_at_weight: dict[float, int] = {}
+        new_volume = 0.0
+        for it in items:
+            w = it.get("weight")
+            r = it.get("reps")
+            try:
+                n_sets = max(1, int(it.get("sets")))
+            except (TypeError, ValueError):
+                n_sets = 1
+            e = estimate_1rm(w, r)
+            if e is not None and (new_best_e1rm is None or e > new_best_e1rm):
+                new_best_e1rm = e
+            if w is None:
+                continue
+            w = float(w)
+            if new_top_weight is None or w > new_top_weight:
+                new_top_weight = w
+            if r:
+                ri = int(r)
+                new_volume += w * ri * n_sets
+                if new_reps_at_weight.get(w, 0) < ri:
+                    new_reps_at_weight[w] = ri
+
+        # 이전 기록(ExerciseSet) 조회 — 워밍업 제외.
+        rows = (
+            session.query(ExerciseSet)
+            .filter(ExerciseSet.user_id == user_id,
+                    ExerciseSet.exercise == exercise,
+                    ExerciseSet.is_warmup.isnot(True))
+            .all()
+        )
+        if not rows:
+            continue   # 첫 기록 → PR 아님
+
+        prior_max_weight = None
+        prior_max_e1rm = None
+        prior_reps_at_weight: dict[float, int] = {}
+        prior_volume_by_date: dict = defaultdict(float)
+        for row in rows:
+            w, r = row.weight, row.reps
+            e = estimate_1rm(w, r)
+            if e is not None and (prior_max_e1rm is None or e > prior_max_e1rm):
+                prior_max_e1rm = e
+            if w is None:
+                continue
+            w = float(w)
+            if prior_max_weight is None or w > prior_max_weight:
+                prior_max_weight = w
+            if r:
+                ri = int(r)
+                prior_volume_by_date[row.date] += w * ri
+                if prior_reps_at_weight.get(w, 0) < ri:
+                    prior_reps_at_weight[w] = ri
+        prior_max_volume = (max(prior_volume_by_date.values())
+                            if prior_volume_by_date else None)
+
+        # ── 판정 ──
+        if (new_top_weight is not None and prior_max_weight is not None
+                and new_top_weight > prior_max_weight):
+            prs.append({"exercise": exercise, "type": "weight",
+                        "value": round(new_top_weight, 1),
+                        "prev": round(prior_max_weight, 1), "unit": "kg"})
+        if (new_best_e1rm is not None and prior_max_e1rm is not None
+                and new_best_e1rm > prior_max_e1rm):
+            prs.append({"exercise": exercise, "type": "e1rm",
+                        "value": round(new_best_e1rm, 1),
+                        "prev": round(prior_max_e1rm, 1), "unit": "kg"})
+        # 렙 PR: 예전에도 다뤄본 무게에서 반복수 경신(가장 큰 경신 하나만).
+        best_rep_pr = None
+        for w, reps in new_reps_at_weight.items():
+            prev_reps = prior_reps_at_weight.get(w)
+            if prev_reps is not None and reps > prev_reps:
+                if best_rep_pr is None or reps - prev_reps > best_rep_pr[0]:
+                    best_rep_pr = (reps - prev_reps, {
+                        "exercise": exercise, "type": "reps",
+                        "value": reps, "prev": prev_reps, "unit": "회",
+                        "weight": round(w, 1)})
+        if best_rep_pr:
+            prs.append(best_rep_pr[1])
+        if (new_volume > 0 and prior_max_volume is not None
+                and new_volume > prior_max_volume):
+            prs.append({"exercise": exercise, "type": "volume",
+                        "value": round(new_volume, 1),
+                        "prev": round(prior_max_volume, 1), "unit": "kg"})
+
+    return prs
+
+
+def pr_headline(prs: list[dict]) -> str:
+    """감지된 PR 목록에서 노트에 붙일 축하 문구 한 줄을 만든다(페르소나 중립).
+
+    가장 임팩트 큰 PR 하나를 헤드라인으로, 나머지는 개수로 요약한다.
+    PR 이 없으면 빈 문자열.
+    """
+    if not prs:
+        return ""
+    top = min(prs, key=lambda p: _PR_PRIORITY.get(p["type"], 9))
+    ex = top["exercise"]
+    if top["type"] == "weight":
+        head = f"🎉 {ex} 최고 중량 경신! {top['prev']}kg → {top['value']}kg"
+    elif top["type"] == "e1rm":
+        head = f"🎉 {ex} 추정 1RM 개인 최고 경신! 약 {top['value']}kg"
+    elif top["type"] == "reps":
+        head = (f"🎉 {ex} {top['weight']}kg 최다 반복 경신! "
+                f"{top['prev']}회 → {top['value']}회")
+    else:
+        head = f"🎉 {ex} 세션 볼륨 최고 경신!"
+    others = len(prs) - 1
+    if others > 0:
+        head += f" (그 외 기록 {others}개도 함께 경신했어요)"
+    return head
