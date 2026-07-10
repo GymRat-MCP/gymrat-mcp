@@ -13,6 +13,7 @@ from tools.meal_intel import classify_meal_text, meal_feedback
 from tools.workout_parser import (
     parse_workout, normalize_exercise, needs_confirmation,
 )
+from tools.analysis import _detect_prs, pr_headline
 
 
 def _today():
@@ -229,6 +230,7 @@ def _workout_log_note(
     parsed: list[dict],
     needs: list[dict],
     auto_filled: list[str],
+    prs: list[dict] | None = None,
 ) -> str:
     valid_items = [item for item in (parsed or []) if item.get("exercise")]
     if not valid_items:
@@ -237,16 +239,21 @@ def _workout_log_note(
     names = [item["exercise"] for item in valid_items[:3]]
     suffix = "" if len(valid_items) <= 3 else f" 외 {len(valid_items) - 3}개"
     if needs:
-        return (
+        body = (
             f"{', '.join(names)}{suffix} 기록을 저장했어요. "
             "다만 빠진 무게·세트·반복이 있어 다음 처방 전에 한 번 더 확인하면 좋아요."
         )
-    if auto_filled:
-        return (
+    elif auto_filled:
+        body = (
             f"{', '.join(names)}{suffix} 기록을 저장했어요. "
             "비어 있던 무게는 이전 기록을 참고해 채웠어요."
         )
-    return f"{', '.join(names)}{suffix} 기록을 저장했어요. 다음 처방에 바로 반영할게요."
+    else:
+        body = f"{', '.join(names)}{suffix} 기록을 저장했어요. 다음 처방에 바로 반영할게요."
+
+    # PR 축하 문구를 앞에 붙여 도파민 먼저(있을 때만).
+    head = pr_headline(prs or [])
+    return f"{head} {body}" if head else body
 
 
 def _expand_to_sets(parsed: list[dict], user_id: str, log_date,
@@ -309,14 +316,17 @@ def log_workout(user_id: str, raw_text: str,
         )
         session.add(log)
         session.flush()   # log.id 확보 → 세트 역참조에 사용
+        # PR 판정(P2): 이번 세트를 add 하기 전에 과거 기록과 비교해야 자기
+        # 자신과 비교하지 않는다.
+        prs = _detect_prs(session, user_id, parsed)
         # 듀얼라이트(P0): parsed 를 세트 단위로 전개해 ExerciseSet 에도 기록
         for s in _expand_to_sets(parsed, user_id, log_date, log.id):
             session.add(s)
         session.commit()
-        base_note = _workout_log_note(parsed, needs, auto_filled)
+        base_note = _workout_log_note(parsed, needs, auto_filled, prs)
         note = apply_persona(base_note, persona)
         return {"parsed": parsed, "needs_confirmation": needs,
-                "auto_filled": auto_filled, "saved": True,
+                "auto_filled": auto_filled, "prs": prs, "saved": True,
                 "persona": persona, "note": note, "base_note": base_note,
                 **persona_response_fields(
                     persona, base_note, note, fallback_field="note")}
@@ -325,7 +335,7 @@ def log_workout(user_id: str, raw_text: str,
         base_note = "운동 기록 저장에 실패했어요. 입력 내용을 한 번만 다시 확인해볼게요."
         note = apply_persona(base_note, persona)
         return {"parsed": parsed, "needs_confirmation": needs_confirmation(parsed),
-                "auto_filled": [], "saved": False, "error": str(e),
+                "auto_filled": [], "prs": [], "saved": False, "error": str(e),
                 "persona": persona, "note": note, "base_note": base_note,
                 **persona_response_fields(
                     persona, base_note, note, fallback_field="note")}
