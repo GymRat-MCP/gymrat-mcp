@@ -70,13 +70,37 @@ def log_workout(user_id: str, raw_text: str,
     """운동 기록을 저장한다.
     raw_text: 사용자가 말한 원문 그대로.
     exercises: 원문을 파싱한 구조화 배열. 각 항목은
-    {exercise: str, weight: float|null, sets: int|null, reps: int|null}.
+    {exercise: str, weight: float|null, sets: int|null, reps: int|null, date?: str}.
     맨몸운동은 weight=null. 반드시 exercise/weight/sets/reps 키로 분해해 넘겨라.
+    date(선택): "3주 전 벤치 70 했었어" 같은 과거 온보딩이면 항목별 date에
+    "YYYY-MM-DD" 또는 "3주 전"/"어제" 상대표현을 넣어라(항목마다 다른 날짜 가능).
+    date 파라미터: 세션 전체가 특정 과거 날짜면 여기에 넣는다(상대표현 인식).
     confirm_with_history=True(기본)면 weight 누락 시 이전 기록에서 자동으로 채운다.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다.
     """
     return logging_tools.log_workout(
         user_id, raw_text, exercises, date, confirm_with_history)
+
+
+@mcp.tool()
+def edit_workout(user_id: str, log_id: int,
+                 exercises: list[dict] = None,
+                 raw_text: str = None,
+                 date: str = None) -> dict:
+    """기존 운동 기록을 수정한다(오타 교정·날짜 정정).
+    log_id: 수정할 기록 id(get_exercise_history/기록 조회로 확인).
+    exercises: 수정된 전체 종목 배열(부분 수정도 전체를 다시 채워 넘긴다).
+      각 항목 {exercise, weight, sets, reps, date?}. date는 "2026-06-01" 또는
+      "3주 전" 같은 상대표현도 가능.
+    date: 세션 전체 날짜를 옮길 때. 응답 note를 사용자에게 전달한다."""
+    return logging_tools.edit_workout(user_id, log_id, exercises, raw_text, date)
+
+
+@mcp.tool()
+def delete_workout(user_id: str, log_id: int) -> dict:
+    """잘못 남긴 운동 기록을 삭제한다(연결된 세트도 함께 제거, 통계 반영).
+    log_id: 삭제할 기록 id. 응답 note를 사용자에게 전달한다."""
+    return logging_tools.delete_workout(user_id, log_id)
 
 
 @mcp.tool()
@@ -112,6 +136,35 @@ def analyze_trend(user_id: str, metric: str = "weight",
     """추세 분석. metric: weight|volume|inbody|meal.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return analysis.analyze_trend(user_id, metric, period_days)
+
+
+@mcp.tool()
+def get_exercise_history(user_id: str, exercise: str,
+                         period_days: int = 90) -> dict:
+    """특정 종목의 힘 추세를 보여준다("내 벤치가 는다"를 숫자로).
+    exercise: 종목명(벤치/스쿼트/데드 등 — 서버가 정규화). 날짜별 최고중량·추정 1RM·볼륨
+    시계열과 e1RM 방향성(up|down|flat)·변화율을 반환한다. 워밍업 세트는 통계 제외.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
+    return analysis.get_exercise_history(user_id, exercise, period_days)
+
+
+@mcp.tool()
+def get_weekly_recap(user_id: str, week_offset: int = 0) -> dict:
+    """주간 운동 리캡 — 세션수·총 볼륨·부위별 볼륨·지난주 대비 변화·신규 PR·
+    보완 부위를 한 번에 요약한다. week_offset=0은 최근 7일, 1은 그 이전 주.
+    응답 note/nudges/assistant_message가 있으면 사용자에게 우선 전달한다."""
+    return analysis.get_weekly_recap(user_id, week_offset)
+
+
+@mcp.tool()
+def get_goal_projection(user_id: str, exercise: str, target_weight: float,
+                        by_date: str | None = None) -> dict:
+    """목표 무게 도달 예상일을 투영한다("9월까지 벤치 100kg").
+    exercise: 종목명(서버가 정규화). target_weight: 목표 추정 1RM(kg).
+    by_date(선택, "YYYY-MM-DD"): 이 시점 안에 닿을지(on_track) 판정.
+    최근 e1RM 상승률로 선형 투영하며, 정체·하락이면 도달 시점을 잡지 않는다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
+    return analysis.get_goal_projection(user_id, exercise, target_weight, by_date)
 
 
 # ---- 처방·코칭 ----

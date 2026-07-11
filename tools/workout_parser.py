@@ -1,4 +1,58 @@
 import re
+from datetime import date as _date_cls, datetime, timedelta
+
+
+# ── 상대 날짜 파싱 (P4: 온보딩·백필) ───────────────────────
+# "3주 전 벤치 70 했었어" 같은 과거 기록을 실제 날짜로 저장하기 위한 순수 함수.
+# 호스트 LLM이 date를 채워주는 게 1차 경로지만, 서버도 결정론적으로 폴백한다.
+_WEEKDAY_KO = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
+
+
+def parse_relative_date(text: str, today: _date_cls | None = None) -> _date_cls | None:
+    """한글 상대 날짜 표현을 실제 date로 변환한다(과거 방향).
+
+    지원: 오늘/어제/그제·그저께/그끄제, N일 전, N주 전, 지난주/지지난주,
+          N달·N개월 전, 지난달, "월~일요일"(가장 최근 지난 해당 요일).
+    인식 불가/빈 문자열이면 None(호출부가 오늘로 폴백).
+    """
+    if not text:
+        return None
+    t = text.strip()
+    base = today or datetime.now().date()
+
+    if "오늘" in t:
+        return base
+    if "그끄제" in t or "그끄저께" in t:
+        return base - timedelta(days=3)
+    if "그제" in t or "그저께" in t:
+        return base - timedelta(days=2)
+    if "어제" in t:
+        return base - timedelta(days=1)
+    if "지지난주" in t:
+        return base - timedelta(weeks=2)
+    if "지난주" in t:
+        return base - timedelta(weeks=1)
+    if "지난달" in t or "지난 달" in t:
+        return base - timedelta(days=30)
+
+    m = re.search(r"(\d+)\s*일\s*전", t)
+    if m:
+        return base - timedelta(days=int(m.group(1)))
+    m = re.search(r"(\d+)\s*주\s*전", t)
+    if m:
+        return base - timedelta(weeks=int(m.group(1)))
+    m = re.search(r"(\d+)\s*(?:달|개월)\s*전", t)
+    if m:
+        return base - timedelta(days=30 * int(m.group(1)))
+
+    m = re.search(r"([월화수목금토일])\s*요일", t)
+    if m:
+        target = _WEEKDAY_KO[m.group(1)]
+        delta = (base.weekday() - target) % 7
+        delta = delta or 7          # 같은 요일이면 '지난' 그 요일(7일 전)
+        return base - timedelta(days=delta)
+
+    return None
 
 
 # ── 볼륨 계산 ──────────────────────────────────────────────
