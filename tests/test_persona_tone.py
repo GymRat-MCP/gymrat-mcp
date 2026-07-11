@@ -40,7 +40,6 @@ class PersonaToneTest(unittest.TestCase):
         recommendation = get_recommendation(user_id)
 
         self.assertIn("악마모드", meal["qualitative_note"])
-        self.assertIn("변명은 여기까지", meal["qualitative_note"])
         self.assertEqual(meal["assistant_message"], meal["qualitative_note"])
         self.assertEqual(meal["display_text"], meal["assistant_message"])
         self.assertEqual(meal["message"], meal["assistant_message"])
@@ -97,8 +96,6 @@ class PersonaToneTest(unittest.TestCase):
         meal = log_meal(user_id, "닭가슴살 밥 샐러드", "점심")
 
         self.assertIn("코치모드", meal["qualitative_note"])
-        self.assertIn("운동 많이 될 거야", meal["qualitative_note"])
-        self.assertIn("스트레스 조금 받을 거야", meal["qualitative_note"])
         self.assertEqual(meal["assistant_message"], meal["qualitative_note"])
         self.assertEqual(meal["persona_context"]["name"], "코치")
         self.assertIn("운동 밈 느낌", meal["persona_context"]["tone"])

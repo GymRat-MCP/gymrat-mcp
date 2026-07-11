@@ -153,6 +153,26 @@ class PersonaHarnessTest(unittest.TestCase):
                     rendered,
                 )
 
+    def test_persona_suffix_rotates_but_is_deterministic(self):
+        # BUG6: 예전엔 매 응답 끝에 같은 상투구가 그대로 반복됐다. 내용 기반으로
+        # 꼬리 문구를 로테이션 → 같은 입력은 항상 같은 출력(결정론), 여러 입력에선
+        # 두 가지 이상 문구가 등장(반복 완화).
+        from tools.persona import _PERSONA_STYLE
+
+        for persona in SUPPORTED_PERSONAS:
+            with self.subTest(persona=persona):
+                self.assertEqual(apply_persona("같은 문장이에요.", persona),
+                                 apply_persona("같은 문장이에요.", persona))
+                _, phrases = _PERSONA_STYLE[persona]
+                used = set()
+                for i in range(40):
+                    rendered = apply_persona(f"피드백 문장 번호 {i} 입니다.", persona)
+                    for p in phrases:
+                        if rendered.endswith(p):
+                            used.add(p)
+                            break
+                self.assertGreater(len(used), 1)   # 상투구 하나로 고정되지 않음
+
     def test_persona_context_avoids_unsafe_or_exact_person_imitation(self):
         for persona in SUPPORTED_PERSONAS:
             with self.subTest(persona=persona):

@@ -3,6 +3,8 @@
 Persona changes wording only. It must not loosen nutrition, safety, or
 training guardrails.
 """
+import zlib
+
 from db.session import SessionLocal
 from db.models import User
 
@@ -160,14 +162,42 @@ def persona_response_fields(
     }
 
 
+# 페르소나별 (라벨 접두사, 꼬리 문구 후보들). 예전엔 페르소나마다 고정 문구
+# 하나를 매 응답 끝에 그대로 붙여 "매번 똑같은 상투구"가 반복됐다. 내용 해시로
+# 후보 중 하나를 골라 로테이션 → 결정론적(테스트 가능)이면서 응답마다 다르게.
+_PERSONA_STYLE = {
+    "악마": ("악마모드", [
+        "변명은 여기까지. 지금 할 것부터 끝내요.",
+        "대충 넘기면 몸은 바로 티 냅니다.",
+        "핑계는 접고 딱 한 세트 더.",
+        "지금 안 하면 내일도 똑같습니다.",
+    ]),
+    "천사": ("천사모드", [
+        "천천히 해도 괜찮으니, 오늘 한 가지만 챙겨봐요.",
+        "무리하지 말고 지금 가능한 만큼만요.",
+        "잘하고 있어요, 이 페이스면 충분해요.",
+        "부담 갖지 말고 한 걸음씩 가봐요.",
+    ]),
+    "현실파이터": ("현실파이터", [
+        "완벽 말고, 지금 가능한 선택부터 갑시다.",
+        "오늘 상황에서 할 수 있는 걸 고릅시다.",
+        "핵심 하나만 잡고 실행합시다.",
+        "된 것부터 챙기면 오늘도 성공입니다.",
+    ]),
+    "코치": ("코치모드", [
+        "운동 많이 될 거야. 오늘 할 거 하면 몸은 좋아진다.",
+        "가볍게 몸 풀고 딱 계획대로 가자.",
+        "오늘 한 세트가 다음 신기록을 만든다.",
+        "힘들면 그게 크는 신호다. 가보자.",
+    ]),
+}
+
+
 def apply_persona(text: str, persona: str | None) -> str:
     if not text:
         return text
 
-    templates = {
-        "악마": "악마모드: {text} 변명은 여기까지. 대충 넘기면 몸은 바로 티 냅니다. 지금 할 것부터 끝내요.",
-        "천사": "천사모드: {text} 천천히 해도 괜찮으니, 오늘 한 가지만 챙겨봐요.",
-        "현실파이터": "현실파이터: {text} 완벽 말고, 지금 가능한 선택부터 갑시다.",
-        "코치": "코치모드: {text} 운동 많이 될 거야. 스트레스 조금 받을 거야. 그래도 오늘 할 거 하면 몸은 좋아질 거야.",
-    }
-    return templates.get(persona, templates[DEFAULT_PERSONA]).format(text=text)
+    label, phrases = _PERSONA_STYLE.get(persona) or _PERSONA_STYLE[DEFAULT_PERSONA]
+    # 내용(text) 기반 안정 해시로 꼬리 문구 선택 → 메시지마다 달라지되 결정론적.
+    idx = zlib.crc32(text.encode("utf-8")) % len(phrases)
+    return f"{label}: {text} {phrases[idx]}"
