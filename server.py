@@ -10,7 +10,7 @@ from fastmcp import FastMCP
 from db.session import init_db, SessionLocal
 from db.models import ExerciseLibrary
 from db.seed_exercises import seed
-from tools import profile, logging_tools, analysis, routine, coaching
+from tools import profile, logging_tools, analysis, routine, coaching, admin
 
 mcp = FastMCP("gymrat-mcp")
 
@@ -220,6 +220,17 @@ def get_recommendation(
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return coaching.get_recommendation(
         user_id, persona_override, goal_override, current_context)
+
+
+# ---- 관리/테스트 ----
+@mcp.tool()
+def reset_user_data(user_id: str) -> dict:
+    """사용자의 모든 기록·프로필을 삭제해 완전 초기 상태로 되돌린다(테스트용).
+    운동 로그·세트·체중·인바디·식단·프로그램·프로필을 전부 지운다.
+    운동 라이브러리(정적 데이터)는 유지된다. ⚠️ 되돌릴 수 없으니
+    사용자가 '초기화/처음부터/리셋'을 명확히 요청했을 때만 호출한다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
+    return admin.reset_user_data(user_id)
 
 
 if __name__ == "__main__":
