@@ -99,8 +99,18 @@ def edit_workout(user_id: str, log_id: int,
 @mcp.tool()
 def delete_workout(user_id: str, log_id: int) -> dict:
     """잘못 남긴 운동 기록을 삭제한다(연결된 세트도 함께 제거, 통계 반영).
-    log_id: 삭제할 기록 id. 응답 note를 사용자에게 전달한다."""
+    log_id: 삭제할 기록 id. 모르면 먼저 get_recent_workouts로 확인한다.
+    응답 note를 사용자에게 전달한다."""
     return logging_tools.delete_workout(user_id, log_id)
+
+
+@mcp.tool()
+def get_recent_workouts(user_id: str, limit: int = 10) -> dict:
+    """최근 운동 기록을 log_id와 함께 조회한다(수정·삭제 대상 식별용).
+    "아까 그거 지워줘/고쳐줘"처럼 특정 기록을 가리키면, edit_workout·delete_workout를
+    부르기 전에 먼저 이 툴로 올바른 log_id를 확인한다(사용자는 id를 모른다).
+    반환 workouts의 각 항목은 {log_id, date, exercises[], summary}."""
+    return logging_tools.get_recent_workouts(user_id, limit)
 
 
 @mcp.tool()
@@ -177,7 +187,8 @@ def generate_routine(user_id: str, focus: str | None = None,
     "lower body" 같은 영문/변형은 내부에서 한글로 매핑하며, 미지정·미인식 시
     available_days(1~6, 범위 밖은 클램프) 기반 분할로 폴백한다(빈 루틴 반환 안 함).
     session_minutes: 분 단위(종목 수 산정에 사용).
-    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
+    ⚠️ 반드시 exercises 배열(종목·무게·세트·반복)을 사용자에게 목록으로 보여줘라.
+    assistant_message에도 '오늘의 종목' 목록이 포함돼 있으니 이 문장을 우선 전달한다."""
     return routine.generate_routine(user_id, focus, available_days, session_minutes)
 
 

@@ -597,6 +597,9 @@ def pr_headline(prs: list[dict]) -> str:
 # ─────────────────────────────────────────────────────────────
 
 _WEEKLY_SET_LANDMARK = 10   # 부위별 주당 최소 세트 하한(routine과 동일 기준)
+# 리캡 보완부위 판정 시 항상 확인할 주요 부위 — 이번 주 0세트여도 짚어준다.
+# (예전엔 실제로 자극한 부위만 검사해 '완전히 빼먹은 부위'는 침묵했다.)
+_MAJOR_PARTS = ("가슴", "등", "어깨", "하체")
 
 
 def _sets_in_window(user_id: str, start, end) -> list:
@@ -694,8 +697,10 @@ def get_weekly_recap(user_id: str, week_offset: int = 0) -> dict:
     prs = _weekly_prs(user_id, start, end)
 
     tonnage_delta = round(cur["tonnage"] - prev["tonnage"], 1)
+    # 실제 자극한 부위 + 주요 부위(0세트 포함)를 함께 검사 → 빼먹은 부위도 짚는다.
     under_target = sorted(
-        p for p in cur["part_sets"] if cur["part_sets"][p] < _WEEKLY_SET_LANDMARK)
+        p for p in (set(cur["part_sets"]) | set(_MAJOR_PARTS))
+        if cur["part_sets"].get(p, 0) < _WEEKLY_SET_LANDMARK)
 
     nudges: list[str] = []
     if cur["sessions"] == 0:
@@ -712,6 +717,7 @@ def get_weekly_recap(user_id: str, week_offset: int = 0) -> dict:
         if prs:
             base += f" 신기록 {len(prs)}개를 세웠어요! 🎉"
         if under_target:
+            base += f" 이번 주 {'·'.join(under_target)} 볼륨이 아직 얇아요."
             nudges.append(
                 f"{'·'.join(under_target)} 볼륨이 주당 권장({_WEEKLY_SET_LANDMARK}세트)"
                 "에 못 미쳐요. 다음 세션에서 보완하면 좋아요.")

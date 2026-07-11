@@ -152,6 +152,8 @@ def generate_routine(user_id: str, focus: str | None = None,
         profile, split_label, exercises, trend, deload, balance)
     persona = normalize_persona(getattr(profile, "persona", None) or DEFAULT_PERSONA)
     rationale = apply_persona(base_rationale, persona)
+    # 종목 목록을 사용자 응답(assistant_message)에 함께 실어 호스트가 빠뜨리지 않게 한다.
+    routine_text = _with_exercise_list(rationale, exercises)
 
     return {"split": split_label, "exercises": exercises, "rationale": rationale,
             "base_rationale": base_rationale,
@@ -160,7 +162,7 @@ def generate_routine(user_id: str, focus: str | None = None,
             "weekly_balance": balance,
             "pattern_mix": _pattern_mix(exercises),
             **persona_response_fields(
-                persona, base_rationale, rationale,
+                persona, base_rationale, routine_text,
                 fallback_field="rationale")}   # 하루 패턴 분포(#15-3)
 
 
@@ -275,6 +277,23 @@ def _pattern_mix(exercises: list[dict]) -> dict[str, int]:
         p = e.get("pattern", "기타")
         mix[p] = mix.get(p, 0) + 1
     return mix
+
+
+def _with_exercise_list(rationale: str, exercises: list[dict]) -> str:
+    """rationale 뒤에 '오늘의 종목' 목록을 붙인다(호스트가 종목을 빠뜨리지 않게).
+
+    exercises는 구조화 배열이라 호스트가 rationale만 보고 종목을 안 보여주는 일이
+    잦았다. 무게×세트×반복을 사람이 읽는 목록으로 assistant_message에 함께 실어
+    '왜 안 보여줘?' 되묻는 문제를 없앤다. 종목명은 영문(출력 시 호스트가 한글화).
+    """
+    if not exercises:
+        return rationale
+    lines = []
+    for i, e in enumerate(exercises, 1):
+        load = e.get("target_load")
+        load_s = f" · 목표 {load:g}kg" if load else ""
+        lines.append(f"{i}. {e['exercise']} {e['sets']}×{e['reps']}{load_s}")
+    return f"{rationale}\n\n오늘의 종목:\n" + "\n".join(lines)
 
 
 def _load_profile(user_id: str):

@@ -287,6 +287,68 @@ def _expand_to_sets(parsed: list[dict], user_id: str, log_date,
     return rows
 
 
+def _resolve_session_date(parsed: list[dict], top_level_date: str | None):
+    """항목별 상대날짜를 실제 날짜(ISO)로 정규화하고 세션 대표 날짜를 정한다.
+
+    - 각 항목의 date("4주 전" 등)를 계산된 날짜로 바꿔 parsed에 되박는다(JSON 정리).
+    - WorkoutLog.date(세션 대표): top-level date 우선, 없으면 항목 날짜 중 가장 이른 날,
+      항목 날짜도 없으면 오늘.
+    ⚠️ 예전엔 항목 date를 무시하고 WorkoutLog.date를 항상 오늘로 저장했다. 그러면
+      백필 세션이 전부 같은 날짜로 뭉쳐 date 정렬이 동점→불특정이 되고(특히 Postgres),
+      루틴의 직전무게·볼륨추세가 꼬였다. 계산 로직(parse_relative_date)은 이미 있었고
+      ExerciseSet엔 반영됐는데 WorkoutLog에만 연결이 빠져 있던 것을 메운다.
+    """
+    item_dates = []
+    for item in parsed:
+        if item.get("date"):
+            d = _parse_date(item["date"])
+            item["date"] = d.isoformat()
+            item_dates.append(d)
+    if top_level_date:
+        return _parse_date(top_level_date)
+    if item_dates:
+        return min(item_dates)
+    return _today()
+
+
+def _injury_caution(user_id: str, parsed: list[dict]) -> str | None:
+    """저장하는 종목이 사용자의 부상 금기 동작이면 부드러운 경고 문구를 만든다(안전).
+
+    routine의 부상 규칙(영문 패턴)을 재사용하고, 로그의 한글 정규명을 라이브러리
+    영문 대표명으로 브리지해 대조한다. 매칭이 없으면 None(경고 없음).
+    부상은 지금까지 루틴 처방에서만 쓰였는데, 정작 사용자가 금기 동작을 직접
+    기록할 때 침묵하던 갭을 메운다.
+    """
+    from tools.routine import _injury_filters
+    from tools.exercise_map import KO_CANON_TO_LIB
+
+    session = SessionLocal()
+    try:
+        user = session.get(User, user_id)
+        injuries = getattr(user, "injuries", None) if user else None
+    finally:
+        session.close()
+    if not injuries:
+        return None
+    _, blocked = _injury_filters(injuries)
+    if not blocked:
+        return None
+
+    flagged: list[str] = []
+    for item in parsed:
+        ex = item.get("exercise")
+        if not ex:
+            continue
+        en = KO_CANON_TO_LIB.get(ex, "")
+        haystack = f"{ex} {en}".lower()
+        if ex not in flagged and any(p in haystack for p in blocked):
+            flagged.append(ex)
+    if not flagged:
+        return None
+    return (f"⚠️ {', '.join(flagged)}는 부상 부위에 무리가 갈 수 있는 동작이에요. "
+            "통증이 있으면 무게를 낮추거나 대체 동작을 추천해줄게요.")
+
+
 def log_workout(user_id: str, raw_text: str,
                 exercises: list[dict] | None = None,
                 date: str | None = None,
@@ -313,7 +375,7 @@ def log_workout(user_id: str, raw_text: str,
                        if confirm_with_history else [])
         # 자동 채움 후 남은 누락만 다시 계산 → 채워진 항목은 자연히 제외
         needs = needs_confirmation(parsed)
-        log_date = _parse_date(date)
+        log_date = _resolve_session_date(parsed, date)
         log = WorkoutLog(
             user_id=user_id, date=log_date,
             raw_text=raw_text, parsed=parsed,
@@ -328,6 +390,9 @@ def log_workout(user_id: str, raw_text: str,
             session.add(s)
         session.commit()
         base_note = _workout_log_note(parsed, needs, auto_filled, prs)
+        caution = _injury_caution(user_id, parsed)
+        if caution:
+            base_note = f"{base_note} {caution}"
         note = apply_persona(base_note, persona)
         return {"parsed": parsed, "needs_confirmation": needs,
                 "auto_filled": auto_filled, "prs": prs, "saved": True,
@@ -426,6 +491,35 @@ def delete_workout(user_id: str, log_id: int) -> dict:
     except Exception as e:
         session.rollback()
         return {"deleted": False, "error": str(e)}
+    finally:
+        session.close()
+
+
+def get_recent_workouts(user_id: str, limit: int = 10) -> dict:
+    """최근 운동 기록을 log_id와 함께 반환한다(수정·삭제 대상 식별용).
+
+    edit_workout/delete_workout는 log_id가 필요한데 사용자는 id를 모른다.
+    "아까 그거 지워줘/고쳐줘" 같은 요청 전에 이 툴로 최근 기록과 id를 확인한다.
+    반환: {workouts: [{log_id, date, exercises[], summary}], count}
+    """
+    session = SessionLocal()
+    try:
+        logs = (session.query(WorkoutLog)
+                .filter(WorkoutLog.user_id == user_id)
+                .order_by(WorkoutLog.date.desc(), WorkoutLog.id.desc())
+                .limit(max(1, min(50, limit)))
+                .all())
+        items = []
+        for lg in logs:
+            names = [e.get("exercise") for e in (lg.parsed or [])
+                     if e.get("exercise")]
+            items.append({
+                "log_id": lg.id,
+                "date": lg.date.isoformat(),
+                "exercises": names,
+                "summary": lg.raw_text or ", ".join(names) or "운동 기록",
+            })
+        return {"workouts": items, "count": len(items)}
     finally:
         session.close()
 
