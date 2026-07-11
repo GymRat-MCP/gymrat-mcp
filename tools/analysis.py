@@ -792,6 +792,21 @@ def get_goal_projection(user_id: str, exercise: str, target_weight: float,
 
     weeks_needed = (target_weight - current) / rate_per_week
     projected = today + timedelta(days=round(weeks_needed * 7))
+
+    # 장기/공격적 목표 가드레일: 근력은 위로 갈수록 둔화해서 단기 상승률의 단선형
+    # 외삽을 '충분히 닿는다'는 약속으로 쓰면 안 된다(예: 96→150을 반년 만에 단정).
+    # 목표가 현재의 +15%를 넘거나 도달까지 16주(≈4개월)를 넘으면 신중 모드.
+    if target_weight > current * 1.15 or weeks_needed > 16:
+        note = (f"{canon} 추정 1RM {current:g}kg에서 목표 {target_weight:g}kg까지는 "
+                f"격차가 커요. 최근 주당 약 {rate_per_week:.1f}kg 상승률을 그대로 늘리면 "
+                f"산술적으론 {projected.isoformat()}쯤이지만, 근력은 위로 갈수록 더뎌져 "
+                "이 속도가 계속되긴 어려워요. 목표에 가까워질수록 정체 구간도 오니 "
+                "중간 목표부터 단계적으로 잡는 걸 추천해요.")
+        return _wrap(note, current_e1rm=current,
+                     rate_per_week=round(rate_per_week, 2),
+                     projected_date=projected.isoformat(),
+                     on_track=None, flag="long_horizon")
+
     note = (f"{canon} 추정 1RM {current:g}kg, 최근 주당 약 {rate_per_week:.1f}kg 상승 중 "
             f"→ 목표 {target_weight:g}kg는 {projected.isoformat()}쯤 도달 예상이에요.")
     on_track = None

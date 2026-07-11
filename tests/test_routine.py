@@ -1,6 +1,29 @@
 """routine 엔진 단위 테스트 — 순수 헬퍼는 DB 불필요, 종목조회는 monkeypatch"""
+from datetime import date
 from types import SimpleNamespace
 import tools.routine as routine
+
+
+def test_build_exercises_orders_big_muscle_compound_first(monkeypatch):
+    # 회귀: 오늘 가슴을 이미 했어도(recent) '가슴 루틴'은 가슴 컴파운드가 먼저,
+    # 삼두 고립은 뒤로. (삼두 고립이 벤치보다 앞서던 순서 버그 교정)
+    fake = {
+        "가슴": [{"name": "barbell bench press", "form_cues": [], "equipment": "바벨", "secondary": ["삼두"]}],
+        "삼두": [
+            {"name": "barbell lying triceps extension", "form_cues": [], "equipment": "바벨", "secondary": []},
+            {"name": "barbell close-grip bench press", "form_cues": [], "equipment": "바벨", "secondary": []},
+        ],
+    }
+    monkeypatch.setattr(routine, "_query_exercises", lambda p, e, a=None: fake.get(p, []))
+    profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
+    history = [SimpleNamespace(date=date.today(),
+                              parsed=[{"exercise": "벤치프레스", "weight": 82.5, "sets": 5, "reps": 5}])]
+    out = routine._build_exercises(["가슴", "삼두"], history, profile, None,
+                                   recent_parts={"가슴"}, focus_part="가슴")
+    names = [e["exercise"] for e in out]
+    assert names[0] == "barbell bench press"       # 대근육 컴파운드 먼저
+    assert (names.index("barbell bench press")
+            < names.index("barbell lying triceps extension"))   # 삼두 고립은 뒤
 
 
 # ── _decide_split ──────────────────────────────────────────

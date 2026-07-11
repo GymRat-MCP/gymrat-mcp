@@ -33,6 +33,13 @@ _PULL = ["등", "이두", "전완"]
 # 메인 볼륨을 밀어내지 않도록). 이 부위만 단독으로 요청되면 정상 개수로 처방.
 _ACCESSORY_PARTS = {"종아리", "전완", "코어"}
 
+# 근육 크기 순위(작을수록 먼저) — 세션 내 종목 정렬에 사용. 대근육 컴파운드를
+# 앞에, 소근육 고립을 뒤로 두는 표준 순서. 삼두 고립이 벤치보다 앞서던 문제 교정.
+_MUSCLE_SIZE_RANK = {
+    "하체": 0, "등": 1, "가슴": 2, "어깨": 3,
+    "삼두": 4, "이두": 4, "전완": 5, "종아리": 5, "코어": 5,
+}
+
 _LEGS = ["하체", "종아리"]
 _UPPER = ["가슴", "등", "어깨", "삼두", "이두"]
 _LOWER = ["하체", "종아리", "코어"]
@@ -146,7 +153,8 @@ def generate_routine(user_id: str, focus: str | None = None,
     split_label, targets = _decide_split(days, focus, history)
     recent_parts = _recently_trained_parts(history)   # 48h 내 자극 부위 후순위(#15-2)
     exercises = _build_exercises(targets, history, profile, session_minutes,
-                                 trend, recent_parts, deload, volume_boost)
+                                 trend, recent_parts, deload, volume_boost,
+                                 focus_part=_normalize_focus(focus))
     balance = _weekly_balance(history)                # 주간 부위별 세트량(#15-2)
     base_rationale = _rationale(
         profile, split_label, exercises, trend, deload, balance)
@@ -436,7 +444,8 @@ def _build_exercises(targets: list[str], history, profile,
                      trend: dict | None = None,
                      recent_parts: set[str] | None = None,
                      deload: bool | None = None,
-                     volume_boost: int = 0) -> list[dict]:
+                     volume_boost: int = 0,
+                     focus_part: str | None = None) -> list[dict]:
     """타깃 부위별 종목 선택 + 목표별 sets/reps + 점진적 과부하 + 부상/회복 회피.
 
     - 볼륨 추세를 읽어 디로드/과부하 분기(#14): 하락·정체면 세트 -1 + 무게 디로드.
@@ -460,8 +469,11 @@ def _build_exercises(targets: list[str], history, profile,
     # 정렬 순서: 다친/최근 자극 부위는 뒤로, 보조 부위(종아리·코어)도 메인 뒤로.
     # (완전 제외하면 빈 루틴 위험 → 순서·개수만 낮춤). sorted는 안정 정렬이라
     # 같은 키 안에선 원래 target 순서를 보존한다.
+    # 명시 focus 부위는 최근 자극(recency)으로 후순위 밀지 않는다 — 사용자가 콕
+    # 집어 요청했는데 오늘 이미 했다고 뒤로 밀면 엉뚱한 보조 부위가 앞선다.
     ordered = sorted(targets,
-                     key=lambda t: (t in deprioritize, t in _ACCESSORY_PARTS))
+                     key=lambda t: (t != focus_part and t in deprioritize,
+                                    t in _ACCESSORY_PARTS))
 
     # 세션 길이 → 총 종목 수(대략 12분/종목), 미지정 시 6종
     if session_minutes:
@@ -482,12 +494,14 @@ def _build_exercises(targets: list[str], history, profile,
     offset = len(history)   # 기록이 쌓일수록 보조 종목이 순환(세션 간 다양성)
     result: list[dict] = []
     for part in ordered:
+        if len(result) >= total_cap:
+            break
         # 부상 악화 동작(오버헤드 프레스 등)은 종목 후보에서 제외
         candidates = [ex for ex in _query_exercises(part, experience, allowed_equip)
                       if not _name_blocked(ex["name"], blocked)]
         for ex in _pick_complementary(candidates, _slots(part), offset):
             if len(result) >= total_cap:
-                return result
+                break
             # 종목 역할별 처방 — 컴파운드/고립에 다른 sets·reps·휴식·강도(Phase A)
             role = exercise_role(ex["name"], ex["secondary"])
             sets, reps, rest_sec, intensity = _prescribe(
@@ -510,6 +524,13 @@ def _build_exercises(targets: list[str], history, profile,
                 "prescription": prescription,      # P3: {weight,reps,sets,scheme,note}
                 "form_cues": ex["form_cues"] or [],
             })
+    # 대근육/컴파운드 먼저: 명시 focus면 그 부위를 앞으로, 그다음 근육 크기순,
+    # 같은 조건이면 컴파운드를 고립보다 앞에 둔다(삼두 고립이 벤치보다 앞서던 문제 교정).
+    result.sort(key=lambda e: (
+        focus_part is not None and e["target"] != focus_part,
+        _MUSCLE_SIZE_RANK.get(e["target"], 3),
+        0 if e["role"] == "compound" else 1,
+    ))
     return result
 
 

@@ -141,6 +141,27 @@ class GoalProjectionTest(unittest.TestCase):
                                 by_date=(today + timedelta(days=120)).isoformat())
         self.assertTrue(r["on_track"])
 
+    def test_far_target_is_cautious(self):
+        # 96kg 유저가 150을 물으면(+56%) 단선형으로 '충분히 닿는다' 단정 금지.
+        uid = "goal-far"
+        today = date.today()
+        session = SessionLocal()
+        try:
+            _seed(session, uid, "벤치프레스", today - timedelta(days=30), 90, 1, sets=1)
+            _seed(session, uid, "벤치프레스", today - timedelta(days=1), 96, 1, sets=1)
+            session.commit()
+        finally:
+            session.close()
+        r = get_goal_projection(uid, "벤치프레스", 150,
+                                by_date=(today + timedelta(days=180)).isoformat())
+        self.assertEqual(r["flag"], "long_horizon")
+        self.assertIsNone(r["on_track"])          # 마감이 멀어도 '닿는다' 단정 X
+        self.assertIn("더뎌", r["note"])           # 둔화 안내
+        # 근거리 목표(+4%)는 여전히 정상 투영으로 남는다(가드레일 과발동 방지).
+        r2 = get_goal_projection(uid, "벤치프레스", 100)
+        self.assertIsNone(r2.get("flag"))
+        self.assertIsNotNone(r2["projected_date"])
+
 
 if __name__ == "__main__":
     unittest.main()
