@@ -10,7 +10,9 @@ from tools.analysis import _trend_volume, _session_volume_with_bw
 # ── 자동 디로드/과부하 분기 ────────────────────────────────
 def test_is_deload_branches():
     assert routine._is_deload({"direction": "down", "flag": None}) is True
-    assert routine._is_deload({"direction": "flat", "flag": "plateau"}) is True
+    # 정체(plateau)는 디로드가 아니다 — 체중 PR이 볼륨을 안 올려 정체로 오판되는데
+    # 무게를 낮추면 발전 중인 리프터를 후퇴시킨다(더블 프로그레션/프로그램 주기가 담당).
+    assert routine._is_deload({"direction": "flat", "flag": "plateau"}) is False
     assert routine._is_deload({"direction": "up", "flag": None}) is False
     assert routine._is_deload({"direction": "flat", "flag": "insufficient_data"}) is False
 

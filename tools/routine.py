@@ -173,8 +173,15 @@ def _volume_trend(user_id: str) -> dict:
 
 
 def _is_deload(trend: dict) -> bool:
-    """볼륨 하락(down) 또는 정체(plateau) → 회복 주간(디로드)."""
-    return trend.get("direction") == "down" or trend.get("flag") == "plateau"
+    """볼륨이 실제로 하락(down)할 때만 회복 주간(디로드).
+
+    ⚠️ 정체(plateau)는 디로드가 아니다. 체중 PR은 볼륨(무게×세트×반복)을 거의
+    안 올려서 발전 중인 리프터도 쉽게 '정체'로 잡히는데, 그때 무게를 ×0.9로 낮추면
+    방금 신기록 세운 사람을 되레 후퇴시킨다(콘솔에서 반복되던 잘못된 '회복 주간').
+    정체는 더블 프로그레션(_progress)이 렙으로 밀고, 계획된 디로드는 프로그램
+    N주차(_program_state)가 담당한다.
+    """
+    return trend.get("direction") == "down"
 
 
 # ── 주기화 프로그램 상태 (#15-1) ───────────────────────────
