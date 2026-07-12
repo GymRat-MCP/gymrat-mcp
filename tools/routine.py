@@ -4,7 +4,7 @@
 form_cues는 exercise_library에서 가져옴(영문 단계) → 출력 시 호스트 LLM이 한글화.
 """
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from db.session import SessionLocal
 from db.models import ExerciseLibrary, WorkoutLog, User, Program
@@ -59,6 +59,41 @@ _SPLIT_PLANS = {
     6: [("Push A", _PUSH), ("Pull A", _PULL), ("Legs A", _LEGS + ["코어"]),
         ("Push B", _PUSH), ("Pull B", _PULL), ("Legs B", _LEGS + ["코어"])],
 }
+
+# 한국형 부위별(브로) 분할 — style="부위별"일 때. 하루 한(두) 부위에 집중.
+# 하루 한 부위면 종목이 충분히(4~5종) 나오게 _distribute가 슬롯을 몰아준다.
+_SPLIT_PLANS_BODYPART = {
+    1: [("전신", _FULL)],
+    2: [("상체", _UPPER), ("하체", _LOWER)],
+    3: [("가슴·삼두", ["가슴", "삼두"]),
+        ("등·이두", ["등", "이두"]),
+        ("하체·어깨", ["하체", "어깨", "종아리"])],
+    4: [("가슴", ["가슴"]), ("등", ["등"]),
+        ("어깨·팔", ["어깨", "이두", "삼두"]), ("하체", _LOWER)],
+    5: [("가슴", ["가슴"]), ("등", ["등"]), ("어깨", ["어깨"]),
+        ("하체", _LOWER), ("팔", ["이두", "삼두", "전완"])],
+    6: [("가슴", ["가슴"]), ("등", ["등"]), ("어깨", ["어깨"]),
+        ("하체", _LOWER), ("팔", ["이두", "삼두", "전완"]),
+        ("약점(코어·종아리)", ["코어", "종아리"])],
+}
+
+# 커스텀/day 지정 정규화가 다루는 유효 부위(= ExerciseLibrary.target 한글 부위).
+_VALID_PARTS = {"가슴", "등", "어깨", "하체", "삼두", "이두", "전완", "종아리", "코어"}
+
+# 부위 표면형(별칭·한자어) → 정규 부위. 긴 것 먼저 매칭(그리디 분해)하도록 길이 desc 정렬.
+# "팔"은 특수 토큰으로 이두·삼두·전완으로 전개한다.
+_ARM_PARTS = ["이두", "삼두", "전완"]
+_PART_SURFACES = sorted([
+    ("가슴", "가슴"), ("흉근", "가슴"),
+    ("등", "등"), ("광배", "등"),
+    ("어깨", "어깨"), ("삼각근", "어깨"), ("삼각", "어깨"),
+    ("하체", "하체"), ("다리", "하체"), ("허벅지", "하체"),
+    ("둔근", "하체"), ("엉덩이", "하체"), ("햄스트링", "하체"),
+    ("삼두", "삼두"), ("이두", "이두"), ("전완", "전완"),
+    ("종아리", "종아리"), ("카프", "종아리"),
+    ("코어", "코어"), ("복근", "코어"), ("복부", "코어"),
+    ("팔", "팔"),
+], key=lambda s: -len(s[0]))
 
 # focus(집중 부위) → 우선순위 타깃들(focus 먼저 + 시너지 근육)
 _FOCUS_TARGETS = {
@@ -132,15 +167,20 @@ _EQUIP_PRIORITY = {
 
 def generate_routine(user_id: str, focus: str | None = None,
                      available_days: int = 3,
-                     session_minutes: int | None = None) -> dict:
+                     session_minutes: int | None = None,
+                     day: str | None = None) -> dict:
     """오늘/이번 주 루틴을 처방한다.
 
-    focus: "가슴"|"하체"|... (None이면 일수 기반 분할에서 오늘 부위 자동 선택)
+    focus: "가슴"|"하체"|... (None이면 분할에서 오늘 부위 자동 선택 = recency)
+    day: 명시 day 지정("2일차"/"등날") — 커스텀/프리셋 분할에서 해당 날 선택.
     반환: {split, exercises[], rationale}
     """
     profile = _load_profile(user_id)
     history = _recent_workouts(user_id)
-    program = _get_or_create_program(user_id, available_days)   # 주기화(#15)
+    # 명시 일수(profile.training_days)가 있으면 그걸로 프로그램을 재설정(Phase C).
+    training_days = getattr(profile, "training_days", None)
+    program = _get_or_create_program(user_id, available_days,
+                                     override_days=training_days)   # 주기화(#15)
     week, program_deload = _program_state(program)
     trend = _volume_trend(user_id)          # 분석 결과를 처방에 먹인다(#14)
     deload = _is_deload(trend) or program_deload   # 추세 or N주차 → 회복 주간
@@ -149,8 +189,13 @@ def generate_routine(user_id: str, focus: str | None = None,
     every = program.deload_every or 4
     volume_boost = 1 if (not deload and week % every == every - 1) else 0
 
-    days = program.split_type or available_days
-    split_label, targets = _decide_split(days, focus, history)
+    days = program.split_type or training_days or available_days
+    experience = normalize_experience(getattr(profile, "experience", None))
+    split_label, targets = _decide_split(
+        days, focus, history,
+        custom_split=getattr(profile, "custom_split", None),
+        split_style=getattr(profile, "split_style", None),
+        experience=experience, day=day)
     recent_parts = _recently_trained_parts(history)   # 48h 내 자극 부위 후순위(#15-2)
     exercises = _build_exercises(targets, history, profile, session_minutes,
                                  trend, recent_parts, deload, volume_boost,
@@ -193,12 +238,17 @@ def _is_deload(trend: dict) -> bool:
 
 
 # ── 주기화 프로그램 상태 (#15-1) ───────────────────────────
-def _get_or_create_program(user_id: str, available_days: int):
+def _get_or_create_program(user_id: str, available_days: int,
+                           override_days: int | None = None):
     """유저의 활성 프로그램을 읽거나(없으면) 오늘 시작으로 생성한다.
 
     세션 종료 후에도 안전하게 쓰도록 필요한 필드만 담은 값 객체를 반환한다.
+    override_days(프로필의 training_days 등 '명시적' 일수)가 있고 기존 프로그램과
+    다르면 갱신한다(자연어 "이제 주 3일만 해" → 다음 처방부터 반영, Phase C).
+    ⚠️ available_days는 기본값(3)이 있어 '호스트 미지정'과 구분이 안 되므로 절대
+    기존 프로그램을 덮어쓰지 않는다. 오직 override_days(명시 신호)만 재설정한다.
     """
-    days = max(1, min(6, available_days))
+    days = max(1, min(6, override_days or available_days))
     session = SessionLocal()
     try:
         prog = (session.query(Program)
@@ -209,6 +259,11 @@ def _get_or_create_program(user_id: str, available_days: int):
                            deload_every=4, week_index=0)
             session.add(prog)
             session.commit()
+        elif override_days is not None:
+            d = max(1, min(6, override_days))
+            if prog.split_type != d:
+                prog.split_type = d
+                session.commit()
         return SimpleNamespace(split_type=prog.split_type,
                                started_at=prog.started_at,
                                deload_every=prog.deload_every or 4)
@@ -340,20 +395,162 @@ def _normalize_focus(focus: str | None) -> str | None:
     return _FOCUS_ALIASES.get(raw.lower())
 
 
-def _decide_split(available_days: int, focus: str | None,
-                  history) -> tuple[str, list[str]]:
-    """일수/focus로 오늘 훈련할 (분할 라벨, 타깃 부위 목록)을 정한다."""
+# ── 부위명 정규화(커스텀 분할·day 지정 입력용) ──────────────
+def _decompose_part(token: str) -> list[str]:
+    """부위 토큰 하나를 정규 부위 목록으로 분해한다.
+
+    - "가슴" → ["가슴"], "다리" → ["하체"](별칭)
+    - "팔" → ["이두","삼두","전완"](전개)
+    - "가슴삼두"처럼 붙여 쓴 것 → ["가슴","삼두"](그리디 최장 매칭 분해)
+    인식 못한 조각은 버린다(빈 루틴/잘못된 부위 방어).
+    """
+    tok = token.strip()
+    if not tok:
+        return []
+    if tok in _VALID_PARTS:
+        return [tok]
+    out: list[str] = []
+    i = 0
+    matched_any = False
+    while i < len(tok):
+        for surface, canon in _PART_SURFACES:
+            if tok.startswith(surface, i):
+                if canon == "팔":
+                    for p in _ARM_PARTS:
+                        if p not in out:
+                            out.append(p)
+                elif canon not in out:
+                    out.append(canon)
+                i += len(surface)
+                matched_any = True
+                break
+        else:
+            i += 1        # 미인식 문자 건너뜀
+    return out if matched_any else []
+
+
+def _normalize_parts(raw_parts) -> list[str]:
+    """자유 입력(리스트/문자열)을 정규 부위 목록으로. 중복·미인식 제거, 순서 보존."""
+    if isinstance(raw_parts, str):
+        raw_parts = [raw_parts]
+    out: list[str] = []
+    for item in (raw_parts or []):
+        for tok in re.split(r"[,/·+&\s]+", str(item)):
+            for p in _decompose_part(tok):
+                if p not in out:
+                    out.append(p)
+    return out
+
+
+def _custom_plan(custom_split) -> list[tuple[str, list[str]]] | None:
+    """User.custom_split(dict) → [(label, parts)] 플랜. 유효 day 없으면 None."""
+    if not custom_split:
+        return None
+    days = custom_split.get("days") if isinstance(custom_split, dict) else None
+    if not days:
+        return None
+    plan: list[tuple[str, list[str]]] = []
+    for d in days:
+        parts = _normalize_parts(d.get("parts")) if isinstance(d, dict) else []
+        if not parts:
+            continue
+        label = (d.get("label") if isinstance(d, dict) else None) or "·".join(parts)
+        plan.append((label, parts))
+    return plan or None
+
+
+def _resolve_plan(split_style: str | None, days: int,
+                  experience: str | None) -> list[tuple[str, list[str]]]:
+    """(스타일, 일수, 경력)으로 프리셋 플랜을 고른다.
+
+    "PPL"=기존 상하체/PPL, "부위별"=한국형 브로 분할, "자동"/미설정=기존 기본
+    (하위호환: 예전 동작 그대로 PPL/상하체). 부위별 권장은 rationale nudge로만.
+    """
+    days = max(1, min(6, days))
+    if split_style == "부위별":
+        return _SPLIT_PLANS_BODYPART[days]
+    return _SPLIT_PLANS[days]
+
+
+def _part_last_date(history) -> dict[str, "object"]:
+    """부위별 '마지막으로 훈련된 날짜'. history는 date desc라 처음 본 게 최신."""
+    last: dict = {}
+    for log in history:
+        d = getattr(log, "date", None)
+        if d is None:
+            continue
+        for entry in (log.parsed or []):
+            p = log_name_to_part(entry.get("exercise"))
+            if p and p not in last:
+                last[p] = d
+    return last
+
+
+def _pick_today_by_recency(plan: list[tuple[str, list[str]]], history) -> int:
+    """가장 오래 안 한 day를 오늘로 고른다(recency). 동률이면 플랜 순서 우선.
+
+    day의 '최근도' = 그 day parts 중 가장 최근에 훈련된 날짜(max). 한 번도 안 한
+    부위는 date.min 취급 → 안 한 day가 먼저 선택된다. 신규 유저(전부 미훈련)는
+    전 day 동률 → 1일차부터.
+    """
+    if not plan:
+        return 0
+    last = _part_last_date(history)
+    floor = date.min
+    best_idx, best_recency = 0, None
+    for idx, (_label, parts) in enumerate(plan):
+        recency = max((last.get(p, floor) for p in parts), default=floor)
+        if best_recency is None or recency < best_recency:
+            best_idx, best_recency = idx, recency
+    return best_idx
+
+
+def _select_day_by_hint(plan: list[tuple[str, list[str]]],
+                        day) -> tuple[str, list[str]] | None:
+    """명시 day 지정("2일차"/"등날"/"어깨")을 플랜의 한 day로 해석."""
+    s = str(day).strip()
+    if not s:
+        return None
+    m = re.search(r"(\d+)", s)          # "2일차" → 인덱스
+    if m:
+        i = int(m.group(1))
+        if 1 <= i <= len(plan):
+            return plan[i - 1]
+    for label, parts in plan:           # 라벨 부분일치
+        if s and s in label:
+            return label, parts
+    hint = set(_normalize_parts([re.sub(r"(날|day|데이)$", "", s)]))
+    if hint:
+        for label, parts in plan:       # 부위 겹침(가장 앞 day)
+            if hint & set(parts):
+                return label, parts
+    return None
+
+
+def _decide_split(available_days: int, focus: str | None, history, *,
+                  custom_split=None, split_style: str | None = None,
+                  experience: str | None = None,
+                  day=None) -> tuple[str, list[str]]:
+    """오늘 훈련할 (분할 라벨, 타깃 부위 목록)을 정한다.
+
+    우선순위: 1) 명시 focus(단일 부위) 2) 명시 day 지정 3) 커스텀 분할(recency)
+    4) 프리셋(스타일·일수 → recency) 5) 폴백(프리셋 1일차).
+    """
     norm = _normalize_focus(focus)
     if norm:
         return f"{norm} 집중", _FOCUS_TARGETS[norm]
 
-    # focus 미지정이거나 인식 못한 값("lower body" 등) → 일수 기반 분할로 폴백.
+    # focus 미지정이거나 인식 못한 값("lower body" 등) → 분할 플랜으로 폴백.
     # ⚠️ 예전엔 미인식 focus를 그대로 target으로 써서 0건→빈 루틴이 나갔음. 절대 금지.
     days = max(1, min(6, available_days))
-    plan = _SPLIT_PLANS[days]
-    # 누적 기록 수로 순환 → 호출할수록 다음 분할일로 진행(결정론적)
-    today_idx = len(history) % len(plan)
-    return plan[today_idx]
+    plan = _custom_plan(custom_split) or _resolve_plan(split_style, days, experience)
+
+    if day is not None:                          # 명시 day 지정
+        picked = _select_day_by_hint(plan, day)
+        if picked:
+            return picked
+
+    return plan[_pick_today_by_recency(plan, history)]   # 오늘의 날 = recency
 
 
 def _injury_filters(injuries: str | None) -> tuple[set[str], list[str]]:
@@ -439,6 +636,32 @@ def _disliked_patterns(disliked: str | list | None) -> list[str]:
     return pats
 
 
+# 부위 수별 슬롯 패턴(1~3부위). 4부위 이상은 각 1종.
+# 2·3부위는 기존 동작(각 2종)과 정합 — 회귀 테스트 개수 불변. 1부위는 몰아줘서
+# '가슴날=가슴 4~5종'이 되게 한다. 총합은 total_cap이 상한으로 최종 클램프.
+_SLOT_PATTERN = {1: [5], 2: [3, 2], 3: [2, 2, 2]}
+
+
+def _distribute(total_cap: int, parts: list[str]) -> dict[str, int]:
+    """총 종목 수(total_cap)를 그 날 부위들에 분배한다.
+
+    1부위→그 부위에 몰아(≤5), 2부위→3+2, 3부위→각 2, 4+부위→각 1(남으면 주
+    부위부터 +1). 실제 개수는 후보 종목 수와 total_cap 루프로 최종 결정된다.
+    """
+    n = len(parts)
+    if n == 0:
+        return {}
+    pattern = _SLOT_PATTERN.get(n)
+    if pattern is None:                    # 4부위 이상 → 각 1, 잔여는 앞 부위부터
+        base = [1] * n
+        extra = max(0, total_cap - n)
+        for i in range(min(extra, n)):
+            base[i] += 1
+        pattern = base
+    slots = {p: min(pattern[i], total_cap) for i, p in enumerate(parts)}
+    return slots
+
+
 def _build_exercises(targets: list[str], history, profile,
                      session_minutes: int | None,
                      trend: dict | None = None,
@@ -480,16 +703,18 @@ def _build_exercises(targets: list[str], history, profile,
         total_cap = max(3, min(8, session_minutes // 12))
     else:
         total_cap = 6
-    per_target = 2 if len(targets) <= 3 else 1
 
-    # 보조 부위는 메인과 함께 나올 때 1종만(종아리 2종+하체 2종처럼 보조가
-    # 메인을 밀어내는 것 방지). 보조 부위만 단독 요청되면 정상 개수로 처방.
+    # 부위 수에 따라 total_cap을 부위별 슬롯으로 분배(⭐ 5분할 '가슴날'이 2종만
+    # 나오던 문제 해결). 보조 부위는 메인과 함께 나올 때 1종으로 캡.
     has_primary = any(t not in _ACCESSORY_PARTS for t in targets)
+    slots = _distribute(total_cap, ordered)
+    if has_primary:
+        for p in list(slots):
+            if p in _ACCESSORY_PARTS:
+                slots[p] = min(slots[p], 1)
 
     def _slots(part: str) -> int:
-        if has_primary and part in _ACCESSORY_PARTS:
-            return 1
-        return per_target
+        return slots.get(part, 1)
 
     offset = len(history)   # 기록이 쌓일수록 보조 종목이 순환(세션 간 다양성)
     result: list[dict] = []
@@ -832,5 +1057,79 @@ def _form_cues(exercise_name: str) -> list[str]:
         ex = (session.query(ExerciseLibrary)
               .filter(ExerciseLibrary.name == exercise_name).first())
         return ex.form_cues if ex and ex.form_cues else []
+    finally:
+        session.close()
+
+
+# ── 커스텀 분할 저장/조회/해제 (Phase B) ────────────────────
+def set_workout_split(user_id: str, days: list[dict]) -> dict:
+    """유저의 커스텀 분할을 저장한다(수정도 전체 재전송 = edit_workout 패턴).
+
+    days=[{"label"?, "parts":[..]}]. 부위명은 정규화("가슴삼두"→["가슴","삼두"],
+    "다리"→["하체"]). 유효 부위가 하나도 없으면 저장하지 않고 에러를 돌려준다.
+    """
+    if not days or not isinstance(days, list):
+        return {"updated": False, "error": "days must be a non-empty list"}
+    normalized: list[dict] = []
+    for i, d in enumerate(days, 1):
+        parts = _normalize_parts(d.get("parts") if isinstance(d, dict) else d)
+        if not parts:
+            continue
+        label = (d.get("label") if isinstance(d, dict) else None) or "·".join(parts)
+        normalized.append({"label": label, "parts": parts})
+    if not normalized:
+        return {"updated": False,
+                "error": "유효한 부위를 찾지 못했어요. 가슴/등/어깨/하체/이두/삼두/"
+                         "전완/종아리/코어 중에서 지정해 주세요."}
+    session = SessionLocal()
+    try:
+        user = session.get(User, user_id)
+        if not user:
+            user = User(id=user_id)
+            session.add(user)
+        user.custom_split = {"days": normalized}
+        session.commit()
+        return {"updated": True, "user_id": user_id,
+                "days": normalized, "day_count": len(normalized)}
+    except Exception as e:
+        session.rollback()
+        return {"updated": False, "error": str(e)}
+    finally:
+        session.close()
+
+
+def get_workout_split(user_id: str) -> dict:
+    """현재 유효 분할을 반환한다 — 커스텀이 있으면 커스텀, 없으면 해석된 프리셋."""
+    profile = _load_profile(user_id)
+    custom = getattr(profile, "custom_split", None)
+    plan = _custom_plan(custom)
+    if plan:
+        return {"source": "custom",
+                "days": [{"label": lbl, "parts": parts} for lbl, parts in plan],
+                "day_count": len(plan)}
+    training_days = getattr(profile, "training_days", None) or 3
+    style = getattr(profile, "split_style", None) or "자동"
+    experience = normalize_experience(getattr(profile, "experience", None))
+    preset = _resolve_plan(style, training_days, experience)
+    return {"source": "preset", "split_style": style,
+            "training_days": max(1, min(6, training_days)),
+            "days": [{"label": lbl, "parts": parts} for lbl, parts in preset],
+            "day_count": len(preset)}
+
+
+def clear_workout_split(user_id: str) -> dict:
+    """커스텀 분할을 제거해 프리셋으로 복귀시킨다."""
+    session = SessionLocal()
+    try:
+        user = session.get(User, user_id)
+        if not user or not user.custom_split:
+            return {"updated": False, "user_id": user_id,
+                    "note": "저장된 커스텀 분할이 없어요(이미 프리셋)."}
+        user.custom_split = None
+        session.commit()
+        return {"updated": True, "user_id": user_id, "note": "프리셋 분할로 되돌렸어요."}
+    except Exception as e:
+        session.rollback()
+        return {"updated": False, "error": str(e)}
     finally:
         session.close()

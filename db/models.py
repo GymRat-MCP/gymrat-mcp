@@ -17,6 +17,9 @@ class User(Base):
     injuries        = Column(Text, nullable=True)         # 자유 텍스트
     available_equipment = Column(Text, nullable=True)     # 보유 장비 자유 텍스트(예: "덤벨,맨몸" / "풀짐"). 루틴 종목 필터
     disliked_exercises  = Column(Text, nullable=True)     # 싫어/못하는 종목(예: "버피,레그익스텐션"). 루틴에서 제외
+    training_days   = Column(Integer, nullable=True)      # 주당 운동일(1~6). 미설정 시 요청의 available_days
+    split_style     = Column(String, nullable=True)       # "자동" | "PPL" | "부위별". 미설정 시 "자동"(=PPL/상하체)
+    custom_split    = Column(JSON, nullable=True)          # 커스텀 분할 {"days":[{"label","parts":[..]}]}
     persona         = Column(String, default="천사")      # "천사" | "악마" | "코치" | "현실파이터"
     summary_context = Column(Text, nullable=True)         # 최근 대화 요약 (호스트 LLM 참조용)
     created_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))

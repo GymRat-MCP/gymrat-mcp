@@ -29,17 +29,22 @@ def update_profile(user_id: str, goal: str | None = None,
                    persona: str | None = None,
                    summary_context: str | None = None,
                    available_equipment: str | None = None,
-                   disliked_exercises: str | None = None) -> dict:
+                   disliked_exercises: str | None = None,
+                   training_days: int | None = None,
+                   split_style: str | None = None) -> dict:
     """프로필을 생성/부분 갱신한다(전달된 필드만).
     goal: 증량|감량|유지. experience: 초보|중급|고급. persona: 천사|악마|코치|현실파이터.
     injuries: 부위를 포함한 자유 텍스트(예: "오른쪽 어깨 회전근개")—루틴에서 자극 동작 회피에 사용.
     available_equipment: 보유 장비(예: "덤벨,맨몸" 또는 "풀짐"/"헬스장")—루틴이 가능한 종목만 처방.
       "풀짐/헬스장"이면 필터 없음. 홈트 유저가 못 쓰는 바벨 종목을 받지 않게 한다.
     disliked_exercises: 싫어하거나 못 하는 종목(예: "버피,레그익스텐션")—루틴에서 제외.
+    training_days: 주당 운동일(1~6). "이제 주 3일만 해" 같은 요청을 다음 처방부터 반영.
+    split_style: 자동|PPL|부위별. "부위별"은 한국형 브로 분할(가슴날·등날…). 미설정=자동(PPL/상하체).
     값은 반드시 한글로 보내라(영문/변형도 내부 정규화하지만 한글이 가장 정확)."""
     return profile.update_profile(user_id, goal, experience, injuries,
                                   persona, summary_context,
-                                  available_equipment, disliked_exercises)
+                                  available_equipment, disliked_exercises,
+                                  training_days, split_style)
 
 
 # ---- 기록 ----
@@ -181,15 +186,43 @@ def get_goal_projection(user_id: str, exercise: str, target_weight: float,
 @mcp.tool()
 def generate_routine(user_id: str, focus: str | None = None,
                      available_days: int = 3,
-                     session_minutes: int | None = None) -> dict:
+                     session_minutes: int | None = None,
+                     day: str | None = None) -> dict:
     """목표·이력 기반 운동 루틴을 처방한다(점진적 과부하 + 자세 큐 + 부상 회피).
     focus(선택): 반드시 한글 부위명 하나로 — 가슴|등|어깨|하체|이두|삼두|팔|코어|종아리.
     "lower body" 같은 영문/변형은 내부에서 한글로 매핑하며, 미지정·미인식 시
-    available_days(1~6, 범위 밖은 클램프) 기반 분할로 폴백한다(빈 루틴 반환 안 함).
+    저장된 분할(커스텀/프리셋)에서 '가장 오래 안 한 날'을 자동 선택한다(빈 루틴 반환 안 함).
+    day(선택): 특정 날 지정("2일차"/"등날"/"어깨"). 커스텀/프리셋 분할의 해당 날을 처방.
     session_minutes: 분 단위(종목 수 산정에 사용).
     ⚠️ 반드시 exercises 배열(종목·무게·세트·반복)을 사용자에게 목록으로 보여줘라.
     assistant_message에도 '오늘의 종목' 목록이 포함돼 있으니 이 문장을 우선 전달한다."""
-    return routine.generate_routine(user_id, focus, available_days, session_minutes)
+    return routine.generate_routine(user_id, focus, available_days,
+                                    session_minutes, day)
+
+
+# ---- 분할(split) 개인화 ----
+@mcp.tool()
+def set_workout_split(user_id: str, days: list[dict]) -> dict:
+    """유저의 커스텀 운동 분할을 저장한다(중급+가 자기 분할을 직접 정의).
+    days: [{"label"?: str, "parts": [부위,...]}] — 하루 = 한 원소.
+    예: [{"label":"가슴·삼두","parts":["가슴","삼두"]}, {"parts":["등","이두"]}, ...]
+    부위명은 한글로: 가슴/등/어깨/하체/이두/삼두/전완/종아리/코어("팔"→이두·삼두·전완,
+    "다리"→하체, "가슴삼두"처럼 붙여 써도 분해). label 생략 시 부위로 자동 생성.
+    수정도 이 툴로 전체 재전송(부분 수정 아님). 저장 후 "오늘 뭐 하지?"가 이 분할을 따른다."""
+    return routine.set_workout_split(user_id, days)
+
+
+@mcp.tool()
+def get_workout_split(user_id: str) -> dict:
+    """현재 유효 분할을 조회한다 — 커스텀이 있으면 커스텀, 없으면 프리셋(스타일·일수 해석).
+    분할 확인·수정 근거용(수정 전 이걸로 현재 상태를 보여주고 set_workout_split로 재저장)."""
+    return routine.get_workout_split(user_id)
+
+
+@mcp.tool()
+def clear_workout_split(user_id: str) -> dict:
+    """저장된 커스텀 분할을 제거해 프리셋(자동/PPL/부위별)으로 되돌린다."""
+    return routine.clear_workout_split(user_id)
 
 
 @mcp.tool()

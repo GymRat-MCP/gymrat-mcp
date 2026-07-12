@@ -7,6 +7,7 @@ from db.session import SessionLocal
 from db.models import User
 
 VALID_PERSONAS = {"천사", "악마", "코치", "현실파이터"}
+VALID_SPLIT_STYLES = {"자동", "PPL", "부위별"}
 
 # 경력 정규화: 표준값 "초보|중급|고급"
 _EXPERIENCE_BEGINNER = ("beginner", "novice", "newbie")
@@ -66,6 +67,9 @@ def get_profile(user_id: str) -> dict:
             "injuries": user.injuries,
             "available_equipment": user.available_equipment,
             "disliked_exercises": user.disliked_exercises,
+            "training_days": user.training_days,
+            "split_style": user.split_style,
+            "custom_split": user.custom_split,
             "persona": user.persona,
             "summary_context": user.summary_context,
         }
@@ -82,10 +86,17 @@ def update_profile(
     summary_context: str | None = None,
     available_equipment: str | None = None,
     disliked_exercises: str | None = None,
+    training_days: int | None = None,
+    split_style: str | None = None,
 ) -> dict:
     """프로필을 생성/갱신한다. 전달된 필드만 업데이트(부분 갱신)."""
     if persona is not None and persona not in VALID_PERSONAS:
         return {"updated": False, "error": f"persona must be one of {VALID_PERSONAS}"}
+    if split_style is not None and split_style not in VALID_SPLIT_STYLES:
+        return {"updated": False,
+                "error": f"split_style must be one of {VALID_SPLIT_STYLES}"}
+    if training_days is not None:
+        training_days = max(1, min(6, int(training_days)))   # 1~6 클램프
 
     session = SessionLocal()
     try:
@@ -104,6 +115,10 @@ def update_profile(
             user.available_equipment = available_equipment
         if disliked_exercises is not None:
             user.disliked_exercises = disliked_exercises
+        if training_days is not None:
+            user.training_days = training_days
+        if split_style is not None:
+            user.split_style = split_style
         if persona is not None:
             user.persona = persona
         if summary_context is not None:
