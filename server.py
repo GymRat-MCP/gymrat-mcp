@@ -10,6 +10,7 @@ from fastmcp import FastMCP
 from db.session import init_db, SessionLocal
 from db.models import ExerciseLibrary
 from db.seed_exercises import seed
+from meal_db.session import init_meal_db
 from tools import profile, logging_tools, analysis, routine, coaching, admin
 
 mcp = FastMCP("gymrat-mcp")
@@ -51,7 +52,8 @@ def update_profile(user_id: str, goal: str | None = None,
 @mcp.tool()
 def log_weight(user_id: str, weight: float, body_fat: float | None = None,
                date: str | None = None) -> dict:
-    """체중(kg)과 선택적 체지방률을 기록한다."""
+    """체중(kg)과 선택적 체지방률을 기록한다.
+    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return logging_tools.log_weight(user_id, weight, body_fat, date)
 
 
@@ -228,10 +230,15 @@ def clear_workout_split(user_id: str) -> dict:
 @mcp.tool()
 def generate_meal_plan(user_id: str, goal_override: str | None = None,
                        preferences: str | None = None,
-                       schedule: list[str] | None = None) -> dict:
-    """질적 식단 가이드를 끼니별로 구성하고 톡캘린더 알림 이벤트를 만든다.
+                       schedule: list[str] | None = None,
+                       persona_override: str | None = None) -> dict:
+    """다양한 균형 식단 후보에서 선호·비선호·알레르기를 반영해 끼니별로 추천한다.
+    정확한 칼로리·그램 처방 대신 구성 요소와 선택 근거를 반환하며,
+    같은 계획 안에서는 동일 메뉴와 핵심 재료의 반복을 줄인다.
+    persona_override는 이번 응답에만 적용하며 프로필은 변경하지 않는다.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
-    return coaching.generate_meal_plan(user_id, goal_override, preferences, schedule)
+    return coaching.generate_meal_plan(
+        user_id, goal_override, preferences, schedule, persona_override)
 
 
 @mcp.tool()
@@ -241,13 +248,16 @@ def suggest_meal_adjustment(
     meal_time: str | None = None,
     goal_override: str | None = None,
     current_context: dict | None = None,
+    persona_override: str | None = None,
 ) -> dict:
     """현재 식사·최근 식단·몸 정보·운동량을 묶어 질적 식단 조정을 제안한다.
     current_context에는 이번 대화에서 입력받은 height_cm, weight_kg,
     weekly_sessions 같은 값을 넣는다. BMI는 참고 신호로만 쓰며 수치 처방은 하지 않는다.
+    persona_override는 이번 응답에만 적용하며 프로필은 변경하지 않는다.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return coaching.suggest_meal_adjustment(
-        user_id, current_meal_text, meal_time, goal_override, current_context)
+        user_id, current_meal_text, meal_time, goal_override,
+        current_context, persona_override)
 
 
 @mcp.tool()
@@ -279,6 +289,7 @@ def reset_user_data(user_id: str) -> dict:
 
 if __name__ == "__main__":
     init_db()
+    init_meal_db()
     # 운동 라이브러리가 비어있으면(새 DB) 1회 적재
     _s = SessionLocal()
     try:

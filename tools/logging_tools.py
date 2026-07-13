@@ -122,6 +122,7 @@ def _meal_confirmation_note(classification: dict) -> str:
 def log_weight(user_id: str, weight: float, body_fat: float | None = None,
                date: str | None = None) -> dict:
     """체중(kg)과 선택적 체지방률(%)을 기록한다."""
+    persona = get_persona(user_id)
     session = SessionLocal()
     try:
         session.add(WeightLog(
@@ -129,10 +130,37 @@ def log_weight(user_id: str, weight: float, body_fat: float | None = None,
             weight=weight, body_fat=body_fat,
         ))
         session.commit()
-        return {"saved": True, "weight": weight}
+        body_fat_text = (
+            f", 체지방률 {body_fat:.1f}%" if body_fat is not None else ""
+        )
+        base_note = (
+            f"체중 {weight:.1f}kg{body_fat_text} 기록을 저장했어요. "
+            "다음 추세 분석에 반영할게요."
+        )
+        note = apply_persona(base_note, persona)
+        return {
+            "saved": True,
+            "weight": weight,
+            "body_fat": body_fat,
+            "persona": persona,
+            "note": note,
+            "base_note": base_note,
+            **persona_response_fields(
+                persona, base_note, note, fallback_field="note"),
+        }
     except Exception as e:
         session.rollback()
-        return {"saved": False, "error": str(e)}
+        base_note = "체중 기록 저장에 실패했어요. 입력 내용을 한 번만 다시 확인해볼게요."
+        note = apply_persona(base_note, persona)
+        return {
+            "saved": False,
+            "error": str(e),
+            "persona": persona,
+            "note": note,
+            "base_note": base_note,
+            **persona_response_fields(
+                persona, base_note, note, fallback_field="note"),
+        }
     finally:
         session.close()
 
