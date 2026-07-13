@@ -58,7 +58,9 @@ class PersonaToneTest(unittest.TestCase):
         self.assertIn("악마모드", plan["note"])
         self.assertEqual(plan["assistant_message"], plan["note"])
         self.assertEqual(plan["display_text"], plan["assistant_message"])
-        self.assertIn("악마모드", plan["meals"][0]["guide"])
+        self.assertNotIn("악마모드", plan["meals"][0]["guide"])
+        self.assertIn("단백질:", plan["meals"][0]["guide"])
+        self.assertIn("선정 기준", plan["meals"][0]["guide"])
         self.assertIn("base_guide", plan["meals"][0])
         self.assertEqual(plan["persona_context"]["name"], "악마")
         self.assertIn("악마모드", recommendation["recommendation"])
@@ -191,11 +193,13 @@ class PersonaToneTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(result["persona"], "천사")
-        self.assertEqual(result["persona_context"]["name"], "천사")
+        self.assertEqual(result["persona"], "악마")
+        self.assertEqual(result["persona_context"]["name"], "악마")
+        self.assertEqual(result["persona_source"], "request_override")
+        self.assertIsNone(result["persona_override_status"])
         self.assertEqual(result["goal"], "증량")
         self.assertEqual(result["evaluation"]["status"], "frequency_on_track_for_gain")
-        self.assertIn("천사모드", result["assistant_message"])
+        self.assertIn("악마모드", result["assistant_message"])
 
     def test_meal_plan_normalizes_goal_override(self):
         user_id = "meal-plan-goal-normalization"
@@ -205,7 +209,9 @@ class PersonaToneTest(unittest.TestCase):
                                     schedule=["08:00"])
 
         self.assertIn("증량 목표", result["base_note"])
-        self.assertIn("단백질을 먼저", result["meals"][0]["base_guide"])
+        self.assertIn("단백질", result["meals"][0]["base_guide"])
+        self.assertIn("탄수화물", result["meals"][0]["base_guide"])
+        self.assertIn("운동 전후", result["goal_focus"])
         self.assertEqual(result["assistant_message"], result["note"])
 
     def test_log_meal_returns_text_classification(self):

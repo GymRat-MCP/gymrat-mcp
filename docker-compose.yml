@@ -9,15 +9,39 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d gymrat"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  meal-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: meal_user
+      POSTGRES_PASSWORD: meal_password
+      POSTGRES_DB: meal_catalog
+    volumes:
+      - meal_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meal_user -d meal_catalog"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   server:
     build: .
     environment:
       DATABASE_URL: postgresql+psycopg://user:password@db:5432/gymrat
+      MEAL_DATABASE_URL: postgresql+psycopg://meal_user:meal_password@meal-db:5432/meal_catalog
     ports:
       - "8000:8000"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      meal-db:
+        condition: service_healthy
 
 volumes:
   pgdata:
+  meal_pgdata:

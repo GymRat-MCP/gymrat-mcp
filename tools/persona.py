@@ -3,7 +3,7 @@
 Persona changes wording only. It must not loosen nutrition, safety, or
 training guardrails.
 """
-import zlib
+import re
 
 from db.session import SessionLocal
 from db.models import User
@@ -162,42 +162,167 @@ def persona_response_fields(
     }
 
 
-# 페르소나별 (라벨 접두사, 꼬리 문구 후보들). 예전엔 페르소나마다 고정 문구
-# 하나를 매 응답 끝에 그대로 붙여 "매번 똑같은 상투구"가 반복됐다. 내용 해시로
-# 후보 중 하나를 골라 로테이션 → 결정론적(테스트 가능)이면서 응답마다 다르게.
-_PERSONA_STYLE = {
-    "악마": ("악마모드", [
-        "변명은 여기까지. 지금 할 것부터 끝내요.",
-        "대충 넘기면 몸은 바로 티 냅니다.",
-        "핑계는 접고 딱 한 세트 더.",
-        "지금 안 하면 내일도 똑같습니다.",
-    ]),
-    "천사": ("천사모드", [
-        "천천히 해도 괜찮으니, 오늘 한 가지만 챙겨봐요.",
-        "무리하지 말고 지금 가능한 만큼만요.",
-        "잘하고 있어요, 이 페이스면 충분해요.",
-        "부담 갖지 말고 한 걸음씩 가봐요.",
-    ]),
-    "현실파이터": ("현실파이터", [
-        "완벽 말고, 지금 가능한 선택부터 갑시다.",
-        "오늘 상황에서 할 수 있는 걸 고릅시다.",
-        "핵심 하나만 잡고 실행합시다.",
-        "된 것부터 챙기면 오늘도 성공입니다.",
-    ]),
-    "코치": ("코치모드", [
-        "운동 많이 될 거야. 오늘 할 거 하면 몸은 좋아진다.",
-        "가볍게 몸 풀고 딱 계획대로 가자.",
-        "오늘 한 세트가 다음 신기록을 만든다.",
-        "힘들면 그게 크는 신호다. 가보자.",
-    ]),
+_PERSONA_LABELS = {
+    "악마": "악마모드",
+    "천사": "천사모드",
+    "현실파이터": "현실파이터",
+    "코치": "코치모드",
 }
+
+
+# 범용 독려 문구가 오히려 안내를 뒤집는 문맥들이다. 예를 들어 회복을 먼저
+# 하라는 문장 뒤에 "힘들면 크는 신호"를 붙이면 페르소나가 안전 안내를
+# 훼손한다. 이 문맥에서는 본문 말투만 바꾸고 범용 꼬리말은 붙이지 않는다.
+_CONTEXT_PATTERNS = {
+    "safety": (
+        "통증", "부상", "다쳤", "회복", "휴식", "수면", "강도 조절",
+        "무게를 낮", "운동을 더 늘리기보다", "중단", "의료", "병원",
+        "정확한 칼로리", "그램 제한", "끼니를 거르는", "굶",
+    ),
+    "error": (
+        "오류", "에러", "실패", "저장하지 못", "처리하지 못", "찾을 수 없",
+        "유효하지 않", "지원하지 않",
+    ),
+    "confirmation": (
+        "알려주면", "알려주세요", "확인해", "단정하기 어려", "맞나요",
+        "있었는지", "더 정확히", "추가로",
+    ),
+    "status": (
+        "첫 인바디 기록", "기록을 저장", "기준점으로 삼", "추세 분석에 반영",
+    ),
+    "plan": (
+        "목표에 맞춰", "식단 계획을", "끼니별 균형을 우선",
+    ),
+}
+
+_STRUCTURED_PREFIX = re.compile(r"^\s*(?:아침|점심|저녁|간식|운동|세트)\s*:")
+_KNOWN_LABELS = tuple(f"{label}:" for label in _PERSONA_LABELS.values())
+
+
+def _message_context(text: str) -> str:
+    """Classify contexts where a generic motivational suffix is inappropriate."""
+    if _STRUCTURED_PREFIX.match(text):
+        return "structured"
+    for context, patterns in _CONTEXT_PATTERNS.items():
+        if any(pattern in text for pattern in patterns):
+            return context
+    if "?" in text or text.rstrip().endswith(("까요?", "나요?", "세요?")):
+        return "confirmation"
+    return "general"
+
+
+def _rewrite_tone(text: str, persona: str, context: str) -> str:
+    """Apply small, deterministic tone edits without changing factual content.
+
+    This is deliberately conservative: tools own the coaching facts and safety
+    decision, while this layer owns sentence cadence and degree of directness.
+    """
+    replacements = {
+        "악마": (
+            ("해봐요", "하세요"),
+            ("챙겨봐요", "챙기세요"),
+            ("챙겨요", "챙기세요"),
+            ("보강해요", "보강하세요"),
+            ("좋을 것 같아요", "좋습니다"),
+            ("좋아요", "좋습니다"),
+            ("알려주면", "알려주세요. 그러면"),
+        ),
+        "천사": (
+            ("해야 합니다", "해도 좋아요"),
+            ("하세요", "해봐요"),
+            ("좋습니다", "좋아요"),
+        ),
+        "현실파이터": (
+            ("챙겨봐요", "챙깁시다"),
+            ("챙겨요", "챙깁시다"),
+            ("보강해요", "보강합시다"),
+            ("보강해봐요", "보강합시다"),
+            ("해봐요", "해봅시다"),
+            ("좋아요", "좋습니다"),
+        ),
+        "코치": (
+            ("해봐요", "해봅시다"),
+            ("챙겨봐요", "챙겨봅시다"),
+            ("챙겨요", "챙겨봅시다"),
+            ("보강해요", "보강해봅시다"),
+            ("좋아요", "좋습니다"),
+        ),
+    }
+
+    rewritten = text
+    for source, target in replacements[persona]:
+        rewritten = rewritten.replace(source, target)
+
+    # 문맥상 필요한 최소한의 성격 차이는 본문 안에서 드러낸다. 안전/확인
+    # 메시지에는 새로운 행동을 덧붙이지 않아 원문의 결정을 보존한다.
+    if context == "general":
+        lead_ins = {
+            "악마": "핵심만 짚겠습니다. ",
+            "천사": "부담 갖지 않아도 괜찮아요. ",
+            "현실파이터": "지금 가능한 것부터 봅시다. ",
+            "코치": "좋습니다, 방향을 잡아봅시다. ",
+        }
+        rewritten = lead_ins[persona] + rewritten
+    elif context == "safety":
+        lead_ins = {
+            "악마": "지금은 무리하지 않는 게 우선입니다. ",
+            "천사": "몸을 먼저 돌봐도 괜찮아요. ",
+            "현실파이터": "지금은 회복을 우선순위로 둡시다. ",
+            "코치": "좋은 훈련은 회복까지 포함합니다. ",
+        }
+        rewritten = lead_ins[persona] + rewritten
+    elif context == "confirmation":
+        lead_ins = {
+            "악마": "정확히 확인하겠습니다. ",
+            "천사": "편하게 하나만 더 알려주세요. ",
+            "현실파이터": "판단에 필요한 것 하나만 확인합시다. ",
+            "코치": "다음 안내를 위해 하나만 확인하겠습니다. ",
+        }
+        rewritten = lead_ins[persona] + rewritten
+    elif context == "error":
+        lead_ins = {
+            "악마": "문제부터 바로잡겠습니다. ",
+            "천사": "괜찮아요, 문제를 차근차근 확인해볼게요. ",
+            "현실파이터": "원인부터 확인합시다. ",
+            "코치": "잠시 점검하고 다시 이어가겠습니다. ",
+        }
+        rewritten = lead_ins[persona] + rewritten
+    elif context == "status":
+        lead_ins = {
+            "악마": "확인했습니다. ",
+            "천사": "좋아요, 차근차근 기록해둘게요. ",
+            "현실파이터": "기록 기준을 잡았습니다. ",
+            "코치": "좋습니다, 기록을 쌓아갑니다. ",
+        }
+        rewritten = lead_ins[persona] + rewritten
+    elif context == "plan":
+        lead_ins = {
+            "악마": "계획은 단순하게 갑니다. ",
+            "천사": "부담 없는 방향으로 맞춰볼게요. ",
+            "현실파이터": "실행 가능한 기준으로 잡겠습니다. ",
+            "코치": "좋습니다, 식사 계획을 잡아봅시다. ",
+        }
+        rewritten = lead_ins[persona] + rewritten
+
+    return rewritten
 
 
 def apply_persona(text: str, persona: str | None) -> str:
     if not text:
         return text
 
-    label, phrases = _PERSONA_STYLE.get(persona) or _PERSONA_STYLE[DEFAULT_PERSONA]
-    # 내용(text) 기반 안정 해시로 꼬리 문구 선택 → 메시지마다 달라지되 결정론적.
-    idx = zlib.crc32(text.encode("utf-8")) % len(phrases)
-    return f"{label}: {text} {phrases[idx]}"
+    # 이미 렌더링된 문장에 라벨과 꼬리말을 중첩하지 않는다.
+    if text.startswith(_KNOWN_LABELS):
+        return text
+
+    normalized = normalize_persona(persona)
+    label = _PERSONA_LABELS[normalized]
+    context = _message_context(text)
+    rendered = _rewrite_tone(text, normalized, context)
+
+    # 끼니별 구조화 문장에는 라벨이 한 화면에서 반복되므로 본문만 반환한다.
+    if context == "structured":
+        return rendered
+    # 페르소나 차이는 본문 안에서 만들고, 모든 상황에 범용 꼬리말을 강제로
+    # 붙이지 않는다. 그래야 동일한 상투구 반복과 안전 문맥 충돌을 함께 피한다.
+    return f"{label}: {rendered}"
