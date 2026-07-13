@@ -38,10 +38,14 @@ def test_split_by_days_no_history():
     assert "Push" in label
     assert "가슴" in targets
 
-def test_split_rotation_by_history():
-    # 3일 분할(길이 3)에서 기록 1개 → 둘째 날(Pull)
-    label, targets = routine._decide_split(3, None, history=[object()])
-    assert "Pull" in label
+def test_split_today_by_recency():
+    # recency: 오늘 가슴(Push)을 했으면 Push는 뒤로, 안 한 Pull이 오늘로.
+    chest_today = SimpleNamespace(
+        date=date.today(),
+        parsed=[{"exercise": "벤치프레스", "weight": 80, "sets": 3, "reps": 8}])
+    label, targets = routine._decide_split(3, None, history=[chest_today])
+    assert "Pull" in label       # 최근 한 Push 대신 안 한 Pull 선택
+    assert "가슴" not in targets
 
 def test_split_days_clamped():
     # 10일 요청 → 6일 분할로 클램프(에러 없이)
@@ -317,3 +321,82 @@ def test_build_exercises_respects_session_cap(monkeypatch):
     # 3부위×부위당 2종 = 6 후보지만 48분 → cap = min(8, 48//12=4) = 4로 제한
     out = routine._build_exercises(["가슴", "삼두", "어깨"], [], profile, 48)
     assert len(out) == 4
+
+
+# ── 부위 수별 종목 배분 _distribute (Phase A-2) ────────────
+def test_distribute_slot_counts():
+    # 1부위=몰아주기(≤5), 2부위=3+2, 3부위=각 2, 4+부위=각 1
+    assert routine._distribute(6, ["가슴"]) == {"가슴": 5}
+    assert routine._distribute(6, ["가슴", "삼두"]) == {"가슴": 3, "삼두": 2}
+    assert routine._distribute(6, ["가슴", "등", "어깨"]) == {"가슴": 2, "등": 2, "어깨": 2}
+    five = routine._distribute(6, ["가슴", "등", "어깨", "하체", "팔"])
+    assert set(five.values()) <= {1, 2}          # 각 1(+잔여 앞부위 +1)
+    assert sum(five.values()) <= 6
+
+def test_distribute_single_part_capped_by_session():
+    # 짧은 세션(36분→cap 3)이면 1부위여도 3종으로 클램프
+    assert routine._distribute(3, ["가슴"]) == {"가슴": 3}
+
+def test_five_split_chest_day_gives_enough(monkeypatch):
+    # ⭐ 5분할 '가슴날' → 가슴 종목 4~5종, 전부 target=가슴
+    chest = [
+        {"name": "barbell bench press", "form_cues": [], "equipment": "바벨", "secondary": []},
+        {"name": "incline dumbbell press", "form_cues": [], "equipment": "덤벨", "secondary": []},
+        {"name": "dumbbell fly", "form_cues": [], "equipment": "덤벨", "secondary": []},
+        {"name": "cable crossover", "form_cues": [], "equipment": "케이블", "secondary": []},
+        {"name": "chest press", "form_cues": [], "equipment": "머신", "secondary": []},
+        {"name": "dips", "form_cues": [], "equipment": "맨몸", "secondary": []},
+    ]
+    monkeypatch.setattr(routine, "_query_exercises", lambda p, e, a=None: chest)
+    profile = SimpleNamespace(goal="증량", experience="중급", injuries=None)
+    out = routine._build_exercises(["가슴"], [], profile, None)
+    assert len(out) >= 4
+    assert all(e["target"] == "가슴" for e in out)
+
+
+# ── 부위명 정규화 _normalize_parts (Phase B) ───────────────
+def test_normalize_parts_compound_and_aliases():
+    assert routine._normalize_parts(["가슴삼두"]) == ["가슴", "삼두"]
+    assert routine._normalize_parts(["다리"]) == ["하체"]
+    assert routine._normalize_parts("등,이두") == ["등", "이두"]
+    assert routine._normalize_parts(["팔"]) == ["이두", "삼두", "전완"]
+    assert routine._normalize_parts(["복근"]) == ["코어"]
+
+def test_normalize_parts_drops_unknown():
+    assert routine._normalize_parts(["asdf", "가슴"]) == ["가슴"]
+    assert routine._normalize_parts([]) == []
+
+
+# ── _decide_split 우선순위 (Phase B) ───────────────────────
+def test_decide_split_custom_recency():
+    custom = {"days": [
+        {"label": "가슴·삼두", "parts": ["가슴", "삼두"]},
+        {"label": "등·이두", "parts": ["등", "이두"]},
+        {"label": "하체", "parts": ["하체"]}]}
+    # 최근 가슴 → 커스텀에서 가슴·삼두 day는 뒤로, 안 한 등·이두가 오늘
+    chest = SimpleNamespace(date=date.today(),
+                            parsed=[{"exercise": "벤치프레스", "weight": 80}])
+    label, targets = routine._decide_split(3, None, history=[chest],
+                                           custom_split=custom)
+    assert targets == ["등", "이두"]
+
+def test_decide_split_day_hint_by_label_and_index():
+    custom = {"days": [
+        {"label": "가슴·삼두", "parts": ["가슴", "삼두"]},
+        {"label": "등·이두", "parts": ["등", "이두"]},
+        {"label": "하체", "parts": ["하체"]}]}
+    _, t1 = routine._decide_split(3, None, [], custom_split=custom, day="하체날")
+    assert t1 == ["하체"]
+    _, t2 = routine._decide_split(3, None, [], custom_split=custom, day="2일차")
+    assert t2 == ["등", "이두"]
+
+def test_decide_split_focus_overrides_custom():
+    custom = {"days": [{"label": "등", "parts": ["등"]}]}
+    label, targets = routine._decide_split(3, "가슴", [], custom_split=custom)
+    assert label == "가슴 집중"       # 명시 focus가 커스텀보다 우선
+
+def test_decide_split_bodypart_preset_style():
+    # style="부위별" 5일 → 부위별 프리셋(가슴날 단독 등)
+    label, targets = routine._decide_split(5, None, [], split_style="부위별")
+    plans = [p for _, p in routine._SPLIT_PLANS_BODYPART[5]]
+    assert targets in plans
