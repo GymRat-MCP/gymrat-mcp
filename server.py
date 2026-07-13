@@ -63,7 +63,7 @@ def log_inbody(user_id: str, weight: float | None = None,
                body_fat_pct: float | None = None,
                measured_date: str | None = None,
                raw_note: str | None = None) -> dict:
-    """인바디 사진에서 추출한 수치를 저장하고 프로필에 반영한다.
+    """사용자가 알려준 인바디 측정 수치(체중·골격근량·체지방률)를 저장하고 프로필에 반영한다.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return logging_tools.log_inbody(user_id, weight, skeletal_muscle,
                                     body_fat_pct, measured_date, raw_note)

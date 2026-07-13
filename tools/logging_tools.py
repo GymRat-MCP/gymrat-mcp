@@ -170,10 +170,10 @@ def log_inbody(user_id: str, weight: float | None = None,
                body_fat_pct: float | None = None,
                measured_date: str | None = None,
                raw_note: str | None = None) -> dict:
-    """인바디 사진에서 추출한 값을 저장하고 프로필에 반영한다.
+    """사용자가 텍스트로 알려준 인바디 측정 수치를 저장하고 프로필에 반영한다.
 
-    비전 추출(호스트 LLM)이 끝난 수치를 받는다. 정확 수치는 화면에
-    박혀 있어 OCR 신뢰도가 높음 — 추정이 아니므로 저장해도 안전.
+    체중·골격근량·체지방률 등 사용자가 직접 불러준 정확 수치를 받는다.
+    추정이 아니라 실측값이므로 저장해도 안전.
     """
     session = SessionLocal()
     try:
