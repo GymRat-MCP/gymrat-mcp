@@ -246,7 +246,7 @@ def get_recommendation(
     if evaluation:
         recommendation = evaluation["message"]
     elif trends["meal"]["flag"] in {"insufficient_data", "low_meal_logging"}:
-        recommendation = "먼저 식단 사진 기록을 조금 더 쌓아봐요. 기록이 생기면 몸 변화와 같이 묶어서 조정할 수 있어요."
+        recommendation = "먼저 식단 기록을 조금 더 쌓아봐요. 기록이 생기면 몸 변화와 같이 묶어서 조정할 수 있어요."
     elif goal == "증량" and trends["weight"]["direction"] == "down":
         recommendation = "증량 목표인데 체중이 내려가는 흐름이에요. 다음 며칠은 끼니를 거르지 말고 단백질과 탄수화물 구성을 안정적으로 가져가봐요."
     elif goal == "감량" and trends["weight"]["direction"] == "up":
@@ -588,7 +588,7 @@ def _recent_meal_pattern(user_id: str, period_days: int = 14) -> dict:
         session.close()
 
     classifications = [
-        classify_meal_text(log.photo_analysis or "")
+        classify_meal_text(log.meal_text or "")
         for log in logs
     ]
     summary = summarize_meal_classifications(classifications)

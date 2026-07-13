@@ -121,14 +121,14 @@ def get_recent_workouts(user_id: str, limit: int = 10) -> dict:
 
 
 @mcp.tool()
-def log_meal(user_id: str, photo_analysis: str,
+def log_meal(user_id: str, meal_text: str,
              meal_time: str | None = None) -> dict:
     """식단 텍스트를 저장하고 질적 코멘트를 단다(수치 처방 X).
-    photo_analysis는 기존 호환용 이름이며, 사진 분석이 없으면 사용자의 식단 원문을 넣는다.
+    meal_text에는 사용자가 말한 식단 원문을 넣는다.
     응답에 pending_confirmation=true가 있으면 사용자에게 assistant_message로 확인 질문을 하고,
     답변을 confirm_meal_details로 넘겨 최종 저장한다.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
-    return logging_tools.log_meal(user_id, photo_analysis, meal_time)
+    return logging_tools.log_meal(user_id, meal_text, meal_time)
 
 
 @mcp.tool()

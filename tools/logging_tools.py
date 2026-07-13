@@ -56,8 +56,8 @@ def _inbody_note(previous: InbodyLog | None, current: InbodyLog) -> str:
     return "직전 인바디 대비 " + ", ".join(parts) + " 변화가 있어요."
 
 
-def _meal_quality_note(photo_analysis: str) -> str:
-    return meal_feedback(classify_meal_text(photo_analysis))
+def _meal_quality_note(meal_text: str) -> str:
+    return meal_feedback(classify_meal_text(meal_text))
 
 
 def _recent_meal_classifications(session, user_id: str, limit: int = 8) -> list[dict]:
@@ -69,7 +69,7 @@ def _recent_meal_classifications(session, user_id: str, limit: int = 8) -> list[
         .all()
     )
     return [
-        classify_meal_text(log.photo_analysis or "")
+        classify_meal_text(log.meal_text or "")
         for log in logs
     ]
 
@@ -107,7 +107,7 @@ def _save_meal_record(
 ) -> None:
     session.add(MealLog(
         user_id=user_id, meal_time=meal_time,
-        photo_analysis=meal_text, qualitative_note=qualitative_note,
+        meal_text=meal_text, qualitative_note=qualitative_note,
     ))
 
 
@@ -552,12 +552,11 @@ def get_recent_workouts(user_id: str, limit: int = 10) -> dict:
         session.close()
 
 
-def log_meal(user_id: str, photo_analysis: str,
+def log_meal(user_id: str, meal_text: str,
             meal_time: str | None = None) -> dict:
     """식단 텍스트를 저장하고 질적 코멘트를 단다.
 
-    photo_analysis는 기존 호환용 파라미터명이다. 사진 분석이 없는 호스트에서는
-    사용자가 말한 식단 원문을 그대로 넘기면 된다.
+    meal_text에는 사용자가 말한 식단 원문을 그대로 넘긴다.
     ⚠️ 가드레일: 정확 칼로리/그램 수치 ❌ → 질적 코칭만.
     """
     persona = get_persona(user_id)
@@ -566,7 +565,7 @@ def log_meal(user_id: str, photo_analysis: str,
     try:
         recent_classifications = _recent_meal_classifications(session, user_id)
         classification = classify_meal_text(
-            photo_analysis,
+            meal_text,
             meal_time=meal_time,
             recent_classifications=recent_classifications,
         )
@@ -578,10 +577,10 @@ def log_meal(user_id: str, photo_analysis: str,
                 "pending_confirmation": True,
                 "confirmation_required": True,
                 "persona": persona,
-                "meal_text": photo_analysis,
+                "meal_text": meal_text,
                 **classification,
                 "pending_meal_confirmation": _pending_meal_payload(
-                    user_id, photo_analysis, meal_time, classification),
+                    user_id, meal_text, meal_time, classification),
                 "qualitative_note": qualitative_note,
                 "base_qualitative_note": base_note,
                 **persona_response_fields(
@@ -592,7 +591,7 @@ def log_meal(user_id: str, photo_analysis: str,
         base_note = meal_feedback(classification)
         qualitative_note = apply_persona(base_note, persona)
         _save_meal_record(
-            session, user_id, photo_analysis,
+            session, user_id, meal_text,
             meal_time or classification.get("meal_time_detected"),
             qualitative_note,
         )
@@ -602,7 +601,7 @@ def log_meal(user_id: str, photo_analysis: str,
             "pending_confirmation": False,
             "confirmation_required": False,
             "persona": persona,
-            "meal_text": photo_analysis,
+            "meal_text": meal_text,
             **classification,
             "qualitative_note": qualitative_note,
             "base_qualitative_note": base_note,

@@ -281,7 +281,7 @@ def _trend_meal(user_id: str, since) -> dict:
             "flag": "insufficient_data",
         })
 
-    classifications = [classify_meal_text(log.photo_analysis or "") for log in logs]
+    classifications = [classify_meal_text(log.meal_text or "") for log in logs]
     scores = [classification["meal_score"] for classification in classifications]
     meal_pattern = summarize_meal_classifications(classifications)
 

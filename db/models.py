@@ -95,7 +95,7 @@ class MealLog(Base):
     id               = Column(Integer, primary_key=True, autoincrement=True)
     user_id          = Column(String, nullable=False)
     meal_time        = Column(String, nullable=True)      # "아침" | "점심" | "저녁" | "간식"
-    photo_analysis   = Column(Text, nullable=True)        # 호스트 LLM 분석 원문
+    meal_text        = Column(Text, nullable=True)        # 사용자가 입력한 식단 원문
     qualitative_note = Column(Text, nullable=True)        # PT쌤 코멘트
     logged_at        = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
