@@ -2,6 +2,11 @@
 
 server.py는 얇게 유지한다: 툴 등록만. 로직은 tools/ 안에.
 전송: Streamable HTTP (원격 Endpoint 등록용).
+
+등록 정책(원격 엔드포인트 심사):
+- 공개 툴은 20개를 넘지 않는다.
+- 모든 툴은 annotations를 정의한다(readOnly/destructive/idempotent 힌트).
+- 모든 description은 서비스명 'GymRatMCP'를 포함한다.
 """
 import os
 
@@ -11,19 +16,24 @@ from db.session import init_db, SessionLocal
 from db.models import ExerciseLibrary
 from db.seed_exercises import seed
 from meal_db.session import init_meal_db
-from tools import profile, logging_tools, analysis, routine, coaching, admin
+from tools import profile, logging_tools, analysis, routine, coaching
 
 mcp = FastMCP("gymrat-mcp")
 
 
 # ---- 프로필 ----
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "프로필 조회",
+    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
 def get_profile(user_id: str) -> dict:
-    """사용자의 저장된 PT 프로필(목표·경력·부상·페르소나)을 조회한다."""
+    """GymRatMCP: 사용자의 저장된 PT 프로필(목표·경력·부상·페르소나)을 조회한다."""
     return profile.get_profile(user_id)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "프로필 갱신",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": False})
 def update_profile(user_id: str, goal: str | None = None,
                    experience: str | None = None,
                    injuries: str | None = None,
@@ -33,7 +43,7 @@ def update_profile(user_id: str, goal: str | None = None,
                    disliked_exercises: str | None = None,
                    training_days: int | None = None,
                    split_style: str | None = None) -> dict:
-    """프로필을 생성/부분 갱신한다(전달된 필드만).
+    """GymRatMCP: 프로필을 생성/부분 갱신한다(전달된 필드만).
     goal: 증량|감량|유지. experience: 초보|중급|고급. persona: 천사|악마|코치|현실파이터.
     injuries: 부위를 포함한 자유 텍스트(예: "오른쪽 어깨 회전근개")—루틴에서 자극 동작 회피에 사용.
     available_equipment: 보유 장비(예: "덤벨,맨몸" 또는 "풀짐"/"헬스장")—루틴이 가능한 종목만 처방.
@@ -49,32 +59,41 @@ def update_profile(user_id: str, goal: str | None = None,
 
 
 # ---- 기록 ----
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "체중 기록",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": False})
 def log_weight(user_id: str, weight: float, body_fat: float | None = None,
                date: str | None = None) -> dict:
-    """체중(kg)과 선택적 체지방률을 기록한다.
+    """GymRatMCP: 체중(kg)과 선택적 체지방률을 기록한다.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return logging_tools.log_weight(user_id, weight, body_fat, date)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "인바디 기록",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": False})
 def log_inbody(user_id: str, weight: float | None = None,
                skeletal_muscle: float | None = None,
                body_fat_pct: float | None = None,
                measured_date: str | None = None,
                raw_note: str | None = None) -> dict:
-    """사용자가 알려준 인바디 측정 수치(체중·골격근량·체지방률)를 저장하고 프로필에 반영한다.
+    """GymRatMCP: 사용자가 알려준 인바디 측정 수치(체중·골격근량·체지방률)를 저장하고 프로필에 반영한다.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return logging_tools.log_inbody(user_id, weight, skeletal_muscle,
                                     body_fat_pct, measured_date, raw_note)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "운동 기록",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": False})
 def log_workout(user_id: str, raw_text: str,
                 exercises: list[dict] = None,
                 date: str = None,
                 confirm_with_history: bool = True) -> dict:
-    """운동 기록을 저장한다.
+    """GymRatMCP: 운동 기록을 저장한다.
     raw_text: 사용자가 말한 원문 그대로.
     exercises: 원문을 파싱한 구조화 배열. 각 항목은
     {exercise: str, weight: float|null, sets: int|null, reps: int|null, date?: str}.
@@ -89,12 +108,15 @@ def log_workout(user_id: str, raw_text: str,
         user_id, raw_text, exercises, date, confirm_with_history)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "운동 기록 수정",
+    "readOnlyHint": False, "destructiveHint": True,
+    "idempotentHint": True, "openWorldHint": False})
 def edit_workout(user_id: str, log_id: int,
                  exercises: list[dict] = None,
                  raw_text: str = None,
                  date: str = None) -> dict:
-    """기존 운동 기록을 수정한다(오타 교정·날짜 정정).
+    """GymRatMCP: 기존 운동 기록을 수정한다(오타 교정·날짜 정정).
     log_id: 수정할 기록 id(get_exercise_history/기록 조회로 확인).
     exercises: 수정된 전체 종목 배열(부분 수정도 전체를 다시 채워 넘긴다).
       각 항목 {exercise, weight, sets, reps, date?}. date는 "2026-06-01" 또는
@@ -103,27 +125,35 @@ def edit_workout(user_id: str, log_id: int,
     return logging_tools.edit_workout(user_id, log_id, exercises, raw_text, date)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "운동 기록 삭제",
+    "readOnlyHint": False, "destructiveHint": True,
+    "idempotentHint": True, "openWorldHint": False})
 def delete_workout(user_id: str, log_id: int) -> dict:
-    """잘못 남긴 운동 기록을 삭제한다(연결된 세트도 함께 제거, 통계 반영).
+    """GymRatMCP: 잘못 남긴 운동 기록을 삭제한다(연결된 세트도 함께 제거, 통계 반영).
     log_id: 삭제할 기록 id. 모르면 먼저 get_recent_workouts로 확인한다.
     응답 note를 사용자에게 전달한다."""
     return logging_tools.delete_workout(user_id, log_id)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "최근 운동 조회",
+    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
 def get_recent_workouts(user_id: str, limit: int = 10) -> dict:
-    """최근 운동 기록을 log_id와 함께 조회한다(수정·삭제 대상 식별용).
+    """GymRatMCP: 최근 운동 기록을 log_id와 함께 조회한다(수정·삭제 대상 식별용).
     "아까 그거 지워줘/고쳐줘"처럼 특정 기록을 가리키면, edit_workout·delete_workout를
     부르기 전에 먼저 이 툴로 올바른 log_id를 확인한다(사용자는 id를 모른다).
     반환 workouts의 각 항목은 {log_id, date, exercises[], summary}."""
     return logging_tools.get_recent_workouts(user_id, limit)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "식단 기록",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": False})
 def log_meal(user_id: str, meal_text: str,
              meal_time: str | None = None) -> dict:
-    """식단 텍스트를 저장하고 질적 코멘트를 단다(수치 처방 X).
+    """GymRatMCP: 식단 텍스트를 저장하고 질적 코멘트를 단다(수치 처방 X).
     meal_text에는 사용자가 말한 식단 원문을 넣는다.
     응답에 pending_confirmation=true가 있으면 사용자에게 assistant_message로 확인 질문을 하고,
     답변을 confirm_meal_details로 넘겨 최종 저장한다.
@@ -131,14 +161,17 @@ def log_meal(user_id: str, meal_text: str,
     return logging_tools.log_meal(user_id, meal_text, meal_time)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "식단 확인 저장",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": False})
 def confirm_meal_details(
     user_id: str,
     original_meal_text: str,
     clarification_text: str,
     meal_time: str | None = None,
 ) -> dict:
-    """애매한 식단 기록의 보충 답변을 받아 최종 저장한다.
+    """GymRatMCP: 애매한 식단 기록의 보충 답변을 받아 최종 저장한다.
     log_meal이 pending_confirmation=true를 반환했을 때 사용한다.
     original_meal_text에는 최초 식단 원문, clarification_text에는 사용자의 추가 답변을 넣는다.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
@@ -147,36 +180,44 @@ def confirm_meal_details(
 
 
 # ---- 분석 ----
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "추세 분석",
+    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
 def analyze_trend(user_id: str, metric: str = "weight",
                   period_days: int = 30) -> dict:
-    """추세 분석. metric: weight|volume|inbody|meal.
+    """GymRatMCP: 추세 분석. metric: weight|volume|inbody|meal.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return analysis.analyze_trend(user_id, metric, period_days)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "종목별 힘 추세",
+    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
 def get_exercise_history(user_id: str, exercise: str,
                          period_days: int = 90) -> dict:
-    """특정 종목의 힘 추세를 보여준다("내 벤치가 는다"를 숫자로).
+    """GymRatMCP: 특정 종목의 힘 추세를 보여준다("내 벤치가 는다"를 숫자로).
     exercise: 종목명(벤치/스쿼트/데드 등 — 서버가 정규화). 날짜별 최고중량·추정 1RM·볼륨
     시계열과 e1RM 방향성(up|down|flat)·변화율을 반환한다. 워밍업 세트는 통계 제외.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return analysis.get_exercise_history(user_id, exercise, period_days)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "주간 리캡",
+    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
 def get_weekly_recap(user_id: str, week_offset: int = 0) -> dict:
-    """주간 운동 리캡 — 세션수·총 볼륨·부위별 볼륨·지난주 대비 변화·신규 PR·
+    """GymRatMCP: 주간 운동 리캡 — 세션수·총 볼륨·부위별 볼륨·지난주 대비 변화·신규 PR·
     보완 부위를 한 번에 요약한다. week_offset=0은 최근 7일, 1은 그 이전 주.
     응답 note/nudges/assistant_message가 있으면 사용자에게 우선 전달한다."""
     return analysis.get_weekly_recap(user_id, week_offset)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "목표 도달 투영",
+    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
 def get_goal_projection(user_id: str, exercise: str, target_weight: float,
                         by_date: str | None = None) -> dict:
-    """목표 무게 도달 예상일을 투영한다("9월까지 벤치 100kg").
+    """GymRatMCP: 목표 무게 도달 예상일을 투영한다("9월까지 벤치 100kg").
     exercise: 종목명(서버가 정규화). target_weight: 목표 추정 1RM(kg).
     by_date(선택, "YYYY-MM-DD"): 이 시점 안에 닿을지(on_track) 판정.
     최근 e1RM 상승률로 선형 투영하며, 정체·하락이면 도달 시점을 잡지 않는다.
@@ -185,12 +226,15 @@ def get_goal_projection(user_id: str, exercise: str, target_weight: float,
 
 
 # ---- 처방·코칭 ----
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "루틴 처방",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": False})
 def generate_routine(user_id: str, focus: str | None = None,
                      available_days: int = 3,
                      session_minutes: int | None = None,
                      day: str | None = None) -> dict:
-    """목표·이력 기반 운동 루틴을 처방한다(점진적 과부하 + 자세 큐 + 부상 회피).
+    """GymRatMCP: 목표·이력 기반 운동 루틴을 처방한다(점진적 과부하 + 자세 큐 + 부상 회피).
     focus(선택): 반드시 한글 부위명 하나로 — 가슴|등|어깨|하체|이두|삼두|팔|코어|종아리.
     "lower body" 같은 영문/변형은 내부에서 한글로 매핑하며, 미지정·미인식 시
     저장된 분할(커스텀/프리셋)에서 '가장 오래 안 한 날'을 자동 선택한다(빈 루틴 반환 안 함).
@@ -203,36 +247,41 @@ def generate_routine(user_id: str, focus: str | None = None,
 
 
 # ---- 분할(split) 개인화 ----
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "운동 분할 저장/초기화",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": False})
 def set_workout_split(user_id: str, days: list[dict]) -> dict:
-    """유저의 커스텀 운동 분할을 저장한다(중급+가 자기 분할을 직접 정의).
+    """GymRatMCP: 유저의 커스텀 운동 분할을 저장한다(중급+가 자기 분할을 직접 정의).
     days: [{"label"?: str, "parts": [부위,...]}] — 하루 = 한 원소.
     예: [{"label":"가슴·삼두","parts":["가슴","삼두"]}, {"parts":["등","이두"]}, ...]
     부위명은 한글로: 가슴/등/어깨/하체/이두/삼두/전완/종아리/코어("팔"→이두·삼두·전완,
     "다리"→하체, "가슴삼두"처럼 붙여 써도 분해). label 생략 시 부위로 자동 생성.
-    수정도 이 툴로 전체 재전송(부분 수정 아님). 저장 후 "오늘 뭐 하지?"가 이 분할을 따른다."""
+    수정도 이 툴로 전체 재전송(부분 수정 아님). 저장 후 "오늘 뭐 하지?"가 이 분할을 따른다.
+    ⚠️ days에 빈 배열([])을 넘기면 커스텀 분할을 제거해 프리셋(자동/PPL/부위별)으로 되돌린다."""
+    if not days:
+        return routine.clear_workout_split(user_id)
     return routine.set_workout_split(user_id, days)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "운동 분할 조회",
+    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
 def get_workout_split(user_id: str) -> dict:
-    """현재 유효 분할을 조회한다 — 커스텀이 있으면 커스텀, 없으면 프리셋(스타일·일수 해석).
-    분할 확인·수정 근거용(수정 전 이걸로 현재 상태를 보여주고 set_workout_split로 재저장)."""
+    """GymRatMCP: 현재 유효 분할을 조회한다 — 커스텀이 있으면 커스텀, 없으면 프리셋(스타일·일수 해석).
+    분할 확인·수정 근거용(수정 전 이걸로 현재 상태를 보여주고 set_workout_split로 재저장).
+    커스텀을 지우고 프리셋으로 되돌리려면 set_workout_split에 빈 배열([])을 넘긴다."""
     return routine.get_workout_split(user_id)
 
 
-@mcp.tool()
-def clear_workout_split(user_id: str) -> dict:
-    """저장된 커스텀 분할을 제거해 프리셋(자동/PPL/부위별)으로 되돌린다."""
-    return routine.clear_workout_split(user_id)
-
-
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "식단 계획 추천",
+    "readOnlyHint": True, "idempotentHint": False, "openWorldHint": False})
 def generate_meal_plan(user_id: str, goal_override: str | None = None,
                        preferences: str | None = None,
                        schedule: list[str] | None = None,
                        persona_override: str | None = None) -> dict:
-    """다양한 균형 식단 후보에서 선호·비선호·알레르기를 반영해 끼니별로 추천한다.
+    """GymRatMCP: 다양한 균형 식단 후보에서 선호·비선호·알레르기를 반영해 끼니별로 추천한다.
     정확한 칼로리·그램 처방 대신 구성 요소와 선택 근거를 반환하며,
     같은 계획 안에서는 동일 메뉴와 핵심 재료의 반복을 줄인다.
     persona_override는 이번 응답에만 적용하며 프로필은 변경하지 않는다.
@@ -241,7 +290,9 @@ def generate_meal_plan(user_id: str, goal_override: str | None = None,
         user_id, goal_override, preferences, schedule, persona_override)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "식단 조정 제안",
+    "readOnlyHint": True, "idempotentHint": False, "openWorldHint": False})
 def suggest_meal_adjustment(
     user_id: str,
     current_meal_text: str | None = None,
@@ -250,7 +301,7 @@ def suggest_meal_adjustment(
     current_context: dict | None = None,
     persona_override: str | None = None,
 ) -> dict:
-    """현재 식사·최근 식단·몸 정보·운동량을 묶어 질적 식단 조정을 제안한다.
+    """GymRatMCP: 현재 식사·최근 식단·몸 정보·운동량을 묶어 질적 식단 조정을 제안한다.
     current_context에는 이번 대화에서 입력받은 height_cm, weight_kg,
     weekly_sessions 같은 값을 넣는다. BMI는 참고 신호로만 쓰며 수치 처방은 하지 않는다.
     persona_override는 이번 응답에만 적용하며 프로필은 변경하지 않는다.
@@ -260,31 +311,22 @@ def suggest_meal_adjustment(
         current_context, persona_override)
 
 
-@mcp.tool()
+@mcp.tool(annotations={
+    "title": "종합 코칭 한마디",
+    "readOnlyHint": True, "idempotentHint": False, "openWorldHint": False})
 def get_recommendation(
     user_id: str,
     persona_override: str | None = None,
     goal_override: str | None = None,
     current_context: dict | None = None,
 ) -> dict:
-    """식단·추세·방향성을 종합한 질적 코칭 한 마디.
+    """GymRatMCP: 식단·추세·방향성을 종합한 질적 코칭 한 마디.
     current_context에는 이번 대화에서 입력받은 수치 데이터(예: weekly_sessions,
     target_weekly_sessions, session_minutes, fatigue, sleep_quality)를 넣는다.
     current_context/persona_override/goal_override는 DB 기본값보다 우선한다.
     응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
     return coaching.get_recommendation(
         user_id, persona_override, goal_override, current_context)
-
-
-# ---- 관리/테스트 ----
-@mcp.tool()
-def reset_user_data(user_id: str) -> dict:
-    """사용자의 모든 기록·프로필을 삭제해 완전 초기 상태로 되돌린다.
-    운동 로그·세트·체중·인바디·식단·프로그램·프로필을 전부 지운다.
-    운동 라이브러리(정적 데이터)는 유지된다. ⚠️ 되돌릴 수 없으니
-    사용자가 '초기화/처음부터/리셋'을 명확히 요청했을 때만 호출한다.
-    응답에 assistant_message가 있으면 사용자에게 이 문장을 우선 전달한다."""
-    return admin.reset_user_data(user_id)
 
 
 if __name__ == "__main__":
