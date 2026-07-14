@@ -24,7 +24,8 @@ mcp = FastMCP("gymrat-mcp")
 # ---- 프로필 ----
 @mcp.tool(annotations={
     "title": "프로필 조회",
-    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": False})
 def get_profile(user_id: str) -> dict:
     """GymRatMCP: 사용자의 저장된 PT 프로필(목표·경력·부상·페르소나)을 조회한다."""
     return profile.get_profile(user_id)
@@ -138,7 +139,8 @@ def delete_workout(user_id: str, log_id: int) -> dict:
 
 @mcp.tool(annotations={
     "title": "최근 운동 조회",
-    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": False})
 def get_recent_workouts(user_id: str, limit: int = 10) -> dict:
     """GymRatMCP: 최근 운동 기록을 log_id와 함께 조회한다(수정·삭제 대상 식별용).
     "아까 그거 지워줘/고쳐줘"처럼 특정 기록을 가리키면, edit_workout·delete_workout를
@@ -182,7 +184,8 @@ def confirm_meal_details(
 # ---- 분석 ----
 @mcp.tool(annotations={
     "title": "추세 분석",
-    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": False})
 def analyze_trend(user_id: str, metric: str = "weight",
                   period_days: int = 30) -> dict:
     """GymRatMCP: 추세 분석. metric: weight|volume|inbody|meal.
@@ -192,7 +195,8 @@ def analyze_trend(user_id: str, metric: str = "weight",
 
 @mcp.tool(annotations={
     "title": "종목별 힘 추세",
-    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": False})
 def get_exercise_history(user_id: str, exercise: str,
                          period_days: int = 90) -> dict:
     """GymRatMCP: 특정 종목의 힘 추세를 보여준다("내 벤치가 는다"를 숫자로).
@@ -204,7 +208,8 @@ def get_exercise_history(user_id: str, exercise: str,
 
 @mcp.tool(annotations={
     "title": "주간 리캡",
-    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": False})
 def get_weekly_recap(user_id: str, week_offset: int = 0) -> dict:
     """GymRatMCP: 주간 운동 리캡 — 세션수·총 볼륨·부위별 볼륨·지난주 대비 변화·신규 PR·
     보완 부위를 한 번에 요약한다. week_offset=0은 최근 7일, 1은 그 이전 주.
@@ -214,7 +219,8 @@ def get_weekly_recap(user_id: str, week_offset: int = 0) -> dict:
 
 @mcp.tool(annotations={
     "title": "목표 도달 투영",
-    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": False})
 def get_goal_projection(user_id: str, exercise: str, target_weight: float,
                         by_date: str | None = None) -> dict:
     """GymRatMCP: 목표 무게 도달 예상일을 투영한다("9월까지 벤치 100kg").
@@ -266,7 +272,8 @@ def set_workout_split(user_id: str, days: list[dict]) -> dict:
 
 @mcp.tool(annotations={
     "title": "운동 분할 조회",
-    "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": False})
 def get_workout_split(user_id: str) -> dict:
     """GymRatMCP: 현재 유효 분할을 조회한다 — 커스텀이 있으면 커스텀, 없으면 프리셋(스타일·일수 해석).
     분할 확인·수정 근거용(수정 전 이걸로 현재 상태를 보여주고 set_workout_split로 재저장).
@@ -276,7 +283,8 @@ def get_workout_split(user_id: str) -> dict:
 
 @mcp.tool(annotations={
     "title": "식단 계획 추천",
-    "readOnlyHint": True, "idempotentHint": False, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": False})
 def generate_meal_plan(user_id: str, goal_override: str | None = None,
                        preferences: str | None = None,
                        schedule: list[str] | None = None,
@@ -292,7 +300,8 @@ def generate_meal_plan(user_id: str, goal_override: str | None = None,
 
 @mcp.tool(annotations={
     "title": "식단 조정 제안",
-    "readOnlyHint": True, "idempotentHint": False, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": False})
 def suggest_meal_adjustment(
     user_id: str,
     current_meal_text: str | None = None,
@@ -313,7 +322,8 @@ def suggest_meal_adjustment(
 
 @mcp.tool(annotations={
     "title": "종합 코칭 한마디",
-    "readOnlyHint": True, "idempotentHint": False, "openWorldHint": False})
+    "readOnlyHint": True, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": False})
 def get_recommendation(
     user_id: str,
     persona_override: str | None = None,
